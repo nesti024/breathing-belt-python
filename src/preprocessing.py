@@ -45,3 +45,54 @@ def high_pass_filter_sample(sample, b, a, zi):
     """
     filtered, zi = lfilter(b, a, [sample], zi=zi)
     return filtered[0], zi
+
+
+# ------------------- Band-pass filter functions -------------------
+def band_pass_filter(data, lowcut, highcut, fs, order=4):
+    """
+    Apply a band-pass filter to the data (batch mode).
+
+    :param data: The input data to filter.
+    :param lowcut: The lower cutoff frequency in Hz.
+    :param highcut: The upper cutoff frequency in Hz.
+    :param fs: The sampling rate in Hz.
+    :param order: The order of the filter (default: 4).
+    :return: The filtered data.
+    """
+    nyquist = 0.5 * fs
+    low = lowcut / nyquist
+    high = highcut / nyquist
+    b, a = butter(order, [low, high], btype='band')
+    return lfilter(b, a, data)
+
+
+def get_band_pass_filter_coeffs(lowcut, highcut, fs, order=4):
+    """
+    Get band-pass filter coefficients and initial state for real-time filtering.
+
+    :param lowcut: The lower cutoff frequency in Hz.
+    :param highcut: The upper cutoff frequency in Hz.
+    :param fs: The sampling rate in Hz.
+    :param order: The order of the filter (default: 4).
+    :return: b, a, zi (filter coefficients and initial state)
+    """
+    nyquist = 0.5 * fs
+    low = lowcut / nyquist
+    high = highcut / nyquist
+    b, a = butter(order, [low, high], btype='band')
+    zi = lfilter_zi(b, a)
+    return b, a, zi
+
+
+def band_pass_filter_sample(sample, b, a, zi):
+    """
+    Filter a single sample with stateful processing (band-pass).
+
+    :param sample: The new sample to filter.
+    :param b: Filter numerator coefficients.
+    :param a: Filter denominator coefficients.
+    :param zi: Filter state.
+    :return: filtered_sample, updated_zi
+    """
+    filtered, zi = lfilter(b, a, [sample], zi=zi)
+    return filtered[0], zi
