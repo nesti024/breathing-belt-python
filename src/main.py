@@ -77,14 +77,20 @@ def acquire_data():
                 filtered_sensor_1_bp, zi_1_bp = band_pass_filter_sample(filtered_sensor_1_hp, b_bp, a_bp, zi_1_bp)
                 channel_1_bp.append(filtered_sensor_1_bp)
 
-            # Apply spike removal to the processed signal before plotting
+            # Apply spike removal and motion artifact detection before plotting
             import numpy as np
-            from preprocessing import remove_spikes
+            from preprocessing import remove_spikes, detect_motion_artifacts
             if len(channel_1_bp) >= 5:  # Only apply if enough samples
                 channel_1_bp_np = np.array(channel_1_bp)
+                # Spike removal
                 channel_1_bp_np = remove_spikes(channel_1_bp_np, kernel_size=5, threshold=3)
-                # Plot the spike-removed signal
-                plot_breathing_channel(channel_1_bp_np.tolist(), sample_indices, live=True, ax=ax_final, line=line_final)
+                # Motion artifact detection
+                artifact_mask = detect_motion_artifacts(channel_1_bp_np, window=10, threshold=5)
+                # Mark artifacts as NaN for plotting (or interpolate if desired)
+                channel_1_bp_artifact = channel_1_bp_np.copy()
+                channel_1_bp_artifact[artifact_mask] = np.nan
+                # Plot the artifact-marked signal
+                plot_breathing_channel(channel_1_bp_artifact.tolist(), sample_indices, live=True, ax=ax_final, line=line_final)
             else:
                 plot_breathing_channel(channel_1_bp, sample_indices, live=True, ax=ax_final, line=line_final)
 
