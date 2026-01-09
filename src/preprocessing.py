@@ -1,3 +1,23 @@
+from scipy.signal import butter, lfilter, lfilter_zi
+import numpy as np
+from scipy.signal import medfilt
+
+def interpolate_artifacts(signal):
+    """
+    Interpolate over NaN values (artifacts) in the signal using linear interpolation.
+    :param signal: 1D numpy array with NaNs marking artifacts
+    :return: Signal with NaNs replaced by interpolated values
+    """
+
+    signal = np.asarray(signal)
+    nans = np.isnan(signal)
+    if np.any(nans):
+        not_nans = ~nans
+        signal[nans] = np.interp(np.flatnonzero(nans), np.flatnonzero(not_nans), signal[not_nans])
+    return signal
+
+
+
 def detect_motion_artifacts(signal, window=10, threshold=5):
     """
     Detect motion artifacts by looking for large changes in the signal.
@@ -7,7 +27,7 @@ def detect_motion_artifacts(signal, window=10, threshold=5):
     :param threshold: Multiplier for std to detect artifact
     :return: Boolean numpy array (True = artifact)
     """
-    import numpy as np
+
     signal = np.asarray(signal)
     diff = np.abs(np.diff(signal, prepend=signal[0]))
     # Rolling std for local adaptivity
@@ -20,8 +40,6 @@ def detect_motion_artifacts(signal, window=10, threshold=5):
         ])
     artifact_mask = diff > threshold * local_std
     return artifact_mask
-from scipy.signal import butter, lfilter, lfilter_zi
-
 
 def high_pass_filter(data, cutoff, fs, order=5):
     """
@@ -121,8 +139,7 @@ def band_pass_filter_sample(sample, b, a, zi):
 
 
 # ------------------- Spike removal function -------------------
-import numpy as np
-from scipy.signal import medfilt
+
 
 def remove_spikes(signal, kernel_size=5, threshold=3):
     """

@@ -8,6 +8,7 @@ from connect import *
 from preprocessing import *
 from plot import *
 import matplotlib.pyplot as plt
+import numpy as np
 
 
 
@@ -78,19 +79,20 @@ def acquire_data():
                 channel_1_bp.append(filtered_sensor_1_bp)
 
             # Apply spike removal and motion artifact detection before plotting
-            import numpy as np
-            from preprocessing import remove_spikes, detect_motion_artifacts
+
             if len(channel_1_bp) >= 5:  # Only apply if enough samples
                 channel_1_bp_np = np.array(channel_1_bp)
                 # Spike removal
                 channel_1_bp_np = remove_spikes(channel_1_bp_np, kernel_size=5, threshold=3)
                 # Motion artifact detection
                 artifact_mask = detect_motion_artifacts(channel_1_bp_np, window=10, threshold=5)
-                # Mark artifacts as NaN for plotting (or interpolate if desired)
+                # Mark artifacts as NaN
                 channel_1_bp_artifact = channel_1_bp_np.copy()
                 channel_1_bp_artifact[artifact_mask] = np.nan
-                # Plot the artifact-marked signal
-                plot_breathing_channel(channel_1_bp_artifact.tolist(), sample_indices, live=True, ax=ax_final, line=line_final)
+                # Adaptive interpolation over artifacts
+                channel_1_bp_interp = interpolate_artifacts(channel_1_bp_artifact)
+                # Plot the interpolated signal
+                plot_breathing_channel(channel_1_bp_interp.tolist(), sample_indices, live=True, ax=ax_final, line=line_final)
             else:
                 plot_breathing_channel(channel_1_bp, sample_indices, live=True, ax=ax_final, line=line_final)
 
