@@ -5,11 +5,8 @@ import keyboard  # Import the keyboard module
 import traceback
 
 from connect import *
-from preprocessing import (
-    get_high_pass_filter_coeffs, high_pass_filter_sample,
-    get_band_pass_filter_coeffs, band_pass_filter_sample
-)
-from plot import plot_breathing_channel, setup_live_plot
+from preprocessing import *
+from plot import *
 import matplotlib.pyplot as plt
 
 
@@ -65,6 +62,7 @@ def acquire_data():
 
 
         print("Press 'c' to stop acquisition.")
+
         while not keyboard.is_pressed('c'):
             data = read_samples(device, 10)  # Read 10 samples at a time
             for sample in data:
@@ -79,8 +77,16 @@ def acquire_data():
                 filtered_sensor_1_bp, zi_1_bp = band_pass_filter_sample(filtered_sensor_1_hp, b_bp, a_bp, zi_1_bp)
                 channel_1_bp.append(filtered_sensor_1_bp)
 
-            # Plot only the final processed signal (after both filters)
-            plot_breathing_channel(channel_1_bp, sample_indices, live=True, ax=ax_final, line=line_final)
+            # Apply spike removal to the processed signal before plotting
+            import numpy as np
+            from preprocessing import remove_spikes
+            if len(channel_1_bp) >= 5:  # Only apply if enough samples
+                channel_1_bp_np = np.array(channel_1_bp)
+                channel_1_bp_np = remove_spikes(channel_1_bp_np, kernel_size=5, threshold=3)
+                # Plot the spike-removed signal
+                plot_breathing_channel(channel_1_bp_np.tolist(), sample_indices, live=True, ax=ax_final, line=line_final)
+            else:
+                plot_breathing_channel(channel_1_bp, sample_indices, live=True, ax=ax_final, line=line_final)
 
         # Stop acquisition
         print("Stopping acquisition...")

@@ -96,3 +96,23 @@ def band_pass_filter_sample(sample, b, a, zi):
     """
     filtered, zi = lfilter(b, a, [sample], zi=zi)
     return filtered[0], zi
+
+
+# ------------------- Spike removal function -------------------
+import numpy as np
+from scipy.signal import medfilt
+
+def remove_spikes(signal, kernel_size=5, threshold=3):
+    """
+    Remove spikes using a median filter and thresholding.
+    :param signal: 1D numpy array of the signal
+    :param kernel_size: Size of the median filter window (odd integer)
+    :param threshold: Multiplier for standard deviation to detect spikes
+    :return: Signal with spikes replaced by median-filtered values
+    """
+    filtered = medfilt(signal, kernel_size)
+    diff = np.abs(signal - filtered)
+    spikes = diff > threshold * np.std(signal)
+    signal_out = np.copy(signal)
+    signal_out[spikes] = filtered[spikes]
+    return signal_out
