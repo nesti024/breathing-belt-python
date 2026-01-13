@@ -1,6 +1,47 @@
+import time
 from scipy.signal import butter, lfilter, lfilter_zi
 import numpy as np
 from scipy.signal import medfilt
+
+
+# ------------------- MaxMinTracker with 1-minute reset -------------------
+class MaxMinTracker:
+    """
+    Tracks max and min values, resetting every one minute.
+    Call update(value) for each new value. Use get_max_min() to get current max/min.
+    """
+    def __init__(self, reset_interval_sec=60):
+        self.reset_interval = reset_interval_sec
+        self.last_reset = time.time()
+        self.max_val = None
+        self.min_val = None
+
+    def update(self, value):
+        now = time.time()
+        if (now - self.last_reset) > self.reset_interval:
+            self.max_val = value
+            self.min_val = value
+            self.last_reset = now
+        else:
+            if self.max_val is None or value > self.max_val:
+                self.max_val = value
+            if self.min_val is None or value < self.min_val:
+                self.min_val = value
+
+    def get_max_min(self):
+        return self.max_val, self.min_val
+    
+
+# ------------------- Normalization function -------------------
+def normalize_value(value, min_val, max_val):
+    """
+    Normalize a value to the range [0, 1] given min and max.
+    If min_val == max_val, returns 0.5 (centered).
+    """
+    if min_val == max_val:
+        return 0.5
+    return (value - min_val) / (max_val - min_val)
+
 
 def interpolate_artifacts(signal):
     """
