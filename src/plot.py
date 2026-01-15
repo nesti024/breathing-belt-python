@@ -10,16 +10,21 @@ def plot_breathing_channel(channel_data, time=None, live=False, ax=None, line=No
 		ax: matplotlib axis, for live plotting.
 		line: matplotlib line object, for live plotting.
 	"""
+		# Always plot only the last 200 points
+	channel_data = channel_data[-200:]
+	if time is not None:
+		time = time[-200:]
 	if live and ax is not None and line is not None:
 		if time is not None:
 			line.set_xdata(time)
+			ax.set_xlim(min(time) if len(time) > 0 else 0, max(time) if len(time) > 0 else 1)
 		else:
 			line.set_xdata(range(len(channel_data)))
+			ax.set_xlim(0, max(len(channel_data)-1, 1))
 		line.set_ydata(channel_data)
-		ax.relim()
-		ax.autoscale_view()
-		plt.draw()
+		ax.set_ylim(0, 1)
 		plt.pause(0.01)
+		plt.show(block=False)
 	else:
 		plt.figure(figsize=(10, 4))
 		if time is not None:
@@ -30,6 +35,7 @@ def plot_breathing_channel(channel_data, time=None, live=False, ax=None, line=No
 			plt.xlabel('Sample')
 		plt.ylabel('Amplitude')
 		plt.title('Breathing Belt Channel Visualization')
+		plt.ylim(0, 1)
 		plt.legend()
 		plt.tight_layout()
 		plt.show()
@@ -40,6 +46,7 @@ def setup_live_plot(title='Breathing Belt Channel Visualization'):
 	line, = ax.plot([], [], label='Breathing Signal')
 	ax.set_xlabel('Sample')
 	ax.set_ylabel('Amplitude')
+	ax.set_ylim(0, 1)
 	ax.set_title(title)
 	ax.legend()
 	plt.tight_layout()
