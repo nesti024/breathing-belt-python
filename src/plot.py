@@ -1,6 +1,6 @@
 import matplotlib.pyplot as plt
 
-def plot_breathing_channel(channel_data, time=None, live=False, ax=None, line=None):
+def plot_breathing_channel(channel_data, time=None, live=False, ax=None, line=None, blit_manager=None):
 	"""
 	Plots a single channel of breathing belt data.
 	Args:
@@ -9,8 +9,9 @@ def plot_breathing_channel(channel_data, time=None, live=False, ax=None, line=No
 		live: bool, if True, updates an existing plot for live visualization.
 		ax: matplotlib axis, for live plotting.
 		line: matplotlib line object, for live plotting.
+		blit_manager: BlitManager object for fast live updates (optional).
 	"""
-		# Always plot only the last 200 points
+	# Always plot only the last 200 points
 	channel_data = channel_data[-200:]
 	if time is not None:
 		time = time[-200:]
@@ -23,8 +24,10 @@ def plot_breathing_channel(channel_data, time=None, live=False, ax=None, line=No
 			ax.set_xlim(0, max(len(channel_data)-1, 1))
 		line.set_ydata(channel_data)
 		ax.set_ylim(0, 1)
-		plt.pause(0.01)
-		plt.show(block=False)
+		if blit_manager is not None:
+			blit_manager.update()
+		else:
+			plt.pause(0.001)  # Only process GUI events, do not call plt.show()
 	else:
 		plt.figure(figsize=(10, 4))
 		if time is not None:
@@ -50,4 +53,35 @@ def setup_live_plot(title='Breathing Belt Channel Visualization'):
 	ax.set_title(title)
 	ax.legend()
 	plt.tight_layout()
-	return fig, ax, line
+	# Blitting for fast updates
+	try:
+		blit_manager = BlitManager(fig, [line])
+	except Exception:
+		blit_manager = None
+	return fig, ax, line, blit_manager
+
+
+# --- BlitManager utility for fast live plotting ---
+class BlitManager:
+	def __init__(self, canvas, animated_artists):
+		self.canvas = canvas
+		self.animated_artists = animated_artists
+		for a in self.animated_artists:
+			a.set_animated(True)
+		self.background = None
+		self._cid = self.canvas.mpl_connect("draw_event", self.on_draw)
+		self.on_draw(None)
+
+	def on_draw(self, event):
+		self.background = self.canvas.figure.canvas.copy_from_bbox(self.canvas.figure.bbox)
+		for a in self.animated_artists:
+			self.canvas.figure.draw_artist(a)
+		self.canvas.flush_events()
+
+	def update(self):
+		if self.background is not None:
+			self.canvas.figure.canvas.restore_region(self.background)
+			for a in self.animated_artists:
+				self.canvas.figure.draw_artist(a)
+			self.canvas.figure.canvas.blit(self.canvas.figure.bbox)
+			self.canvas.flush_events()
