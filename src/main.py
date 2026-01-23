@@ -136,30 +136,42 @@ def acquire_data():
                 
 
             # Apply spike removal and motion artifact detection before plotting
-            if len(channel_1_hp) >= 5:  # Only apply if enough samples
-                channel_1_hp_np = np.array(channel_1_hp)
-                # Spike removal
-                channel_1_hp_np = remove_spikes(channel_1_hp_np, kernel_size=5, threshold=3)
-                # Motion artifact detection
-                artifact_mask = detect_motion_artifacts(channel_1_hp_np, window=10, threshold=5)
+            if len(channel_1_hp) >= 5:
+                # Only process the latest chunk for spike removal and artifact detection
+                chunk_len = chunk_size if len(channel_1_hp) >= chunk_size else len(channel_1_hp)
+                # Get the last chunk
+                recent_hp = np.array(channel_1_hp[-chunk_len:])
+                # Spike removal on the chunk
+                recent_hp_processed = remove_spikes(recent_hp, kernel_size=5, threshold=2)
+                # Motion artifact detection on the chunk (lowered window and threshold for better sensitivity)
+                artifact_mask = detect_motion_artifacts(recent_hp_processed, window=5, threshold=2)
+                print(f"Artifacts: {artifact_mask.sum()}/{len(artifact_mask)} detected in chunk.")
                 # Mark artifacts as NaN
-                channel_1_hp_artifact = channel_1_hp_np.copy()
-                channel_1_hp_artifact[artifact_mask] = np.nan
+                recent_hp_artifact = recent_hp_processed.copy()
+                recent_hp_artifact[artifact_mask] = np.nan
                 # Adaptive interpolation over artifacts
-                channel_1_hp_interp = interpolate_artifacts(channel_1_hp_artifact)
+                recent_hp_interp = interpolate_artifacts(recent_hp_artifact)
+
+                # Build the processed signal for plotting (old processed + new processed chunk)
+                if 'channel_1_hp_processed' not in locals():
+                    channel_1_hp_processed = []
+                # Remove the last chunk_len from processed if present (to avoid overlap)
+                channel_1_hp_processed = channel_1_hp_processed[:-(chunk_len)] if len(channel_1_hp_processed) >= chunk_len else []
+                channel_1_hp_processed.extend(recent_hp_interp.tolist())
 
                 # Normalize the processed/interpolated signal using min/max from tracker
                 max_val, min_val = minmax_tracker.get_max_min()
                 if max_val is not None and min_val is not None:
-                    normalized_interp = [normalize_value(val, min_val, max_val) for val in channel_1_hp_interp.tolist()]
+                    normalized_interp = [normalize_value(val, min_val, max_val) for val in channel_1_hp_processed]
                 else:
-                    normalized_interp = channel_1_hp_interp.tolist()
+                    normalized_interp = channel_1_hp_processed
 
-                # Plot the normalized, processed signal
-                # Only plot the last 200 points
+                # Plot the normalized, processed signal (last 200 points)
+                # Ensure both arrays have the same length
+                n_plot = min(200, len(normalized_interp), len(sample_indices))
                 plot_breathing_channel(
-                    normalized_interp[-200:],
-                    sample_indices[-200:],
+                    normalized_interp[-n_plot:],
+                    sample_indices[-n_plot:],
                     live=True, ax=ax_final, line=line_final, blit_manager=blit_manager_final)
                 # Print only the newest normalized data point
                 if len(normalized_interp) > 0:
@@ -173,9 +185,10 @@ def acquire_data():
                     normalized_hp = channel_1_hp
 
                 # Only plot the last 200 points
+                n_plot = min(200, len(normalized_hp), len(sample_indices))
                 plot_breathing_channel(
-                    normalized_hp[-200:],
-                    sample_indices[-200:],
+                    normalized_hp[-n_plot:],
+                    sample_indices[-n_plot:],
                     live=True, ax=ax_final, line=line_final, blit_manager=blit_manager_final)
                 # Print only the newest normalized data point
                 if len(normalized_hp) > 0:
