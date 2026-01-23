@@ -1,5 +1,5 @@
 import time
-from scipy.signal import butter, lfilter, lfilter_zi
+from scipy.signal import butter, lfilter, lfilter_zi, sosfilt, sosfilt_zi
 import numpy as np
 from scipy.signal import medfilt
 
@@ -18,15 +18,30 @@ class MaxMinTracker:
 
     def update(self, value: float) -> None:
         now = time.time()
+        # Initialize on first call with a small range to avoid division by zero
+        if self.max_val is None:
+            self.max_val = value + 0.1  # Add small offset to create initial range
+            self.min_val = value - 0.1
+            return
+        
         if (now - self.last_reset) > self.reset_interval:
-            self.max_val = value
-            self.min_val = value
+            # Soft reset: decay range towards current value (by 10%)
+            # Move max down toward the center
+            self.max_val = max(value, self.max_val - abs(self.max_val) * 0.1)
+            # Move min up toward the center
+            self.min_val = min(value, self.min_val + abs(self.min_val) * 0.1)
             self.last_reset = now
         else:
-            if self.max_val is None or value > self.max_val:
+            if value > self.max_val:
                 self.max_val = value
-            if self.min_val is None or value < self.min_val:
+            if value < self.min_val:
                 self.min_val = value
+        
+        # Safety: ensure min < max with at least a small margin
+        if self.max_val - self.min_val < 0.01:
+            center = (self.max_val + self.min_val) / 2
+            self.max_val = center + 0.01
+            self.min_val = center - 0.01
 
     def get_max_min(self) -> tuple:
         return self.max_val, self.min_val
@@ -53,7 +68,7 @@ def interpolate_artifacts(signal: np.ndarray) -> np.ndarray:
     :param signal: 1D numpy array with NaNs marking artifacts
     :return: Signal with NaNs replaced by interpolated values
     """
-    signal = np.asarray(signal)
+    signal = np.asarray(signal).copy()  # Make a copy to avoid modifying input
     nans = np.isnan(signal)
     if np.all(nans):
         return np.zeros_like(signal)
@@ -83,7 +98,8 @@ def detect_motion_artifacts(signal: np.ndarray, window: int = 10, threshold: flo
     except ImportError:
         # Fallback to slower method if pandas not available
         if len(signal) < window:
-            local_std = np.std(signal)
+            # Return array filled with global std for consistency
+            local_std = np.full(len(signal), np.std(signal) if len(signal) > 1 else 1.0)
         else:
             local_std = np.array([
                 np.std(signal[max(0, i-window):i+1]) if i > 0 else np.std(signal[:1])
@@ -95,6 +111,7 @@ def detect_motion_artifacts(signal: np.ndarray, window: int = 10, threshold: flo
 def high_pass_filter(data: np.ndarray, cutoff: float, fs: float, order: int = 5) -> np.ndarray:
     """
     Apply a high-pass filter to the data (batch mode).
+    Uses second-order sections (SOS) for improved numerical stability.
 
     :param data: The input data to filter.
     :param cutoff: The cutoff frequency of the filter in Hz.
@@ -104,40 +121,45 @@ def high_pass_filter(data: np.ndarray, cutoff: float, fs: float, order: int = 5)
     """
     nyquist = 0.5 * fs
     normal_cutoff = cutoff / nyquist
-    b, a = butter(order, normal_cutoff, btype='high', analog=False)
-    return lfilter(b, a, data)
+    if normal_cutoff >= 1.0 or normal_cutoff <= 0:
+        raise ValueError(f"Cutoff {cutoff} Hz invalid for sampling rate {fs} Hz")
+    sos = butter(order, normal_cutoff, btype='high', analog=False, output='sos')
+    return sosfilt(sos, data)
 
 
 def get_high_pass_filter_coeffs(cutoff: float, fs: float, order: int = 5, initial_value: float = None):
     """
     Get high-pass filter coefficients and initial state for real-time filtering.
+    Uses second-order sections (SOS) for improved numerical stability with low cutoff frequencies.
 
     :param cutoff: The cutoff frequency of the filter in Hz.
     :param fs: The sampling rate in Hz.
     :param order: The order of the filter (default: 5).
     :param initial_value: Optional first sample value to scale zi and avoid transient artifacts.
-    :return: b, a, zi (filter coefficients and initial state)
+    :return: sos, zi (second-order sections and initial state)
     """
     nyquist = 0.5 * fs
     normal_cutoff = cutoff / nyquist
-    b, a = butter(order, normal_cutoff, btype='high', analog=False)
-    zi = lfilter_zi(b, a)
+    if normal_cutoff >= 1.0 or normal_cutoff <= 0:
+        raise ValueError(f"Cutoff {cutoff} Hz invalid for sampling rate {fs} Hz")
+    sos = butter(order, normal_cutoff, btype='high', analog=False, output='sos')
+    zi = sosfilt_zi(sos)
     if initial_value is not None:
         zi = zi * initial_value
-    return b, a, zi
+    return sos, zi
 
 
-def high_pass_filter_sample(sample: float, b, a, zi):
+def high_pass_filter_sample(sample: float, sos, zi):
     """
     Filter a single sample with stateful processing.
+    Uses second-order sections (SOS) for improved numerical stability.
 
     :param sample: The new sample to filter.
-    :param b: Filter numerator coefficients.
-    :param a: Filter denominator coefficients.
+    :param sos: Second-order sections filter representation.
     :param zi: Filter state.
     :return: filtered_sample, updated_zi
     """
-    filtered, zi = lfilter(b, a, [sample], zi=zi)
+    filtered, zi = sosfilt(sos, [sample], zi=zi)
     return filtered[0], zi
 
 
@@ -145,6 +167,7 @@ def high_pass_filter_sample(sample: float, b, a, zi):
 def band_pass_filter(data: np.ndarray, lowcut: float, highcut: float, fs: float, order: int = 4) -> np.ndarray:
     """
     Apply a band-pass filter to the data (batch mode).
+    Uses second-order sections (SOS) for improved numerical stability.
 
     :param data: The input data to filter.
     :param lowcut: The lower cutoff frequency in Hz.
@@ -156,42 +179,47 @@ def band_pass_filter(data: np.ndarray, lowcut: float, highcut: float, fs: float,
     nyquist = 0.5 * fs
     low = lowcut / nyquist
     high = highcut / nyquist
-    b, a = butter(order, [low, high], btype='band')
-    return lfilter(b, a, data)
+    if low <= 0 or low >= 1.0 or high <= 0 or high >= 1.0 or low >= high:
+        raise ValueError(f"Invalid band-pass cutoffs: {lowcut}-{highcut} Hz for sampling rate {fs} Hz")
+    sos = butter(order, [low, high], btype='band', output='sos')
+    return sosfilt(sos, data)
 
 
 def get_band_pass_filter_coeffs(lowcut: float, highcut: float, fs: float, order: int = 4, initial_value: float = None):
     """
     Get band-pass filter coefficients and initial state for real-time filtering.
+    Uses second-order sections (SOS) for improved numerical stability.
 
     :param lowcut: The lower cutoff frequency in Hz.
     :param highcut: The upper cutoff frequency in Hz.
     :param fs: The sampling rate in Hz.
     :param order: The order of the filter (default: 4).
     :param initial_value: Optional first sample value to scale zi and avoid transient artifacts.
-    :return: b, a, zi (filter coefficients and initial state)
+    :return: sos, zi (second-order sections and initial state)
     """
     nyquist = 0.5 * fs
     low = lowcut / nyquist
     high = highcut / nyquist
-    b, a = butter(order, [low, high], btype='band')
-    zi = lfilter_zi(b, a)
+    if low <= 0 or low >= 1.0 or high <= 0 or high >= 1.0 or low >= high:
+        raise ValueError(f"Invalid band-pass cutoffs: {lowcut}-{highcut} Hz for sampling rate {fs} Hz")
+    sos = butter(order, [low, high], btype='band', output='sos')
+    zi = sosfilt_zi(sos)
     if initial_value is not None:
         zi = zi * initial_value
-    return b, a, zi
+    return sos, zi
 
 
-def band_pass_filter_sample(sample: float, b, a, zi):
+def band_pass_filter_sample(sample: float, sos, zi):
     """
     Filter a single sample with stateful processing (band-pass).
+    Uses second-order sections (SOS) for improved numerical stability.
 
     :param sample: The new sample to filter.
-    :param b: Filter numerator coefficients.
-    :param a: Filter denominator coefficients.
+    :param sos: Second-order sections filter representation.
     :param zi: Filter state.
     :return: filtered_sample, updated_zi
     """
-    filtered, zi = lfilter(b, a, [sample], zi=zi)
+    filtered, zi = sosfilt(sos, [sample], zi=zi)
     return filtered[0], zi
 
 

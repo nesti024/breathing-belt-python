@@ -53,9 +53,11 @@ def setup_live_plot(title='Breathing Belt Channel Visualization'):
 	ax.set_title(title)
 	ax.legend()
 	plt.tight_layout()
+	plt.show(block=False)  # Show the window immediately
+	plt.pause(0.01)  # Give time for window to appear
 	# Blitting for fast updates
 	try:
-		blit_manager = BlitManager(fig, [line])
+		blit_manager = BlitManager(fig.canvas, [line])
 	except Exception:
 		blit_manager = None
 	return fig, ax, line, blit_manager
