@@ -15,6 +15,8 @@ class MaxMinTracker:
         self.last_reset = time.time()
         self.max_val = None
         self.min_val = None
+        self.last_value = None
+        self.activity_threshold = 0.01  # Minimum change to consider as activity
 
     def update(self, value: float) -> None:
         now = time.time()
@@ -22,20 +24,28 @@ class MaxMinTracker:
         if self.max_val is None:
             self.max_val = value + 0.1  # Add small offset to create initial range
             self.min_val = value - 0.1
+            self.last_value = value
             return
         
-        if (now - self.last_reset) > self.reset_interval:
-            # Soft reset: decay range towards current value (by 10%)
-            # Move max down toward the center
+        # Check if there's significant signal change (breathing activity)
+        signal_change = abs(value - self.last_value) if self.last_value is not None else 0
+        is_active = signal_change > self.activity_threshold
+        
+        if (now - self.last_reset) > self.reset_interval and is_active:
+            # Soft reset: only decay when there's active breathing
+            # Move max down toward the center by 10%
             self.max_val = max(value, self.max_val - abs(self.max_val) * 0.1)
-            # Move min up toward the center
+            # Move min up toward the center by 10%
             self.min_val = min(value, self.min_val + abs(self.min_val) * 0.1)
             self.last_reset = now
         else:
+            # Always update max/min if new extremes are reached
             if value > self.max_val:
                 self.max_val = value
             if value < self.min_val:
                 self.min_val = value
+        
+        self.last_value = value
         
         # Safety: ensure min < max with at least a small margin
         if self.max_val - self.min_val < 0.01:
