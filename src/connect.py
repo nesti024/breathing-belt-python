@@ -1,5 +1,6 @@
 import bitalino
 import time
+import numpy as np
 
 def connect_device(mac_address, retries=3, retry_delay=2.0, timeout=None):
     """
@@ -26,8 +27,16 @@ def start_acquisition(device, sampling_rate, channels):
 def read_samples(device, sample_count):
     """
     Read a batch of samples from the device.
+    Returns numpy array of shape (sample_count, n_columns) or None on failure.
     """
-    return device.read(sample_count)
+    try:
+        data = device.read(sample_count)
+        if data is None or len(data) == 0:
+            return None
+        return data
+    except Exception as e:
+        print(f"Read error: {e}")
+        return None
 
 def stop_acquisition(device):
     """
