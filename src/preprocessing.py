@@ -99,12 +99,15 @@ def detect_motion_artifacts(signal: np.ndarray, window: int = 10, threshold: flo
     :param threshold: Multiplier for std to detect artifact
     :return: Boolean numpy array (True = artifact)
     """
-    signal = np.asarray(signal)
+    signal = np.asarray(signal, dtype=float)
+    if signal.size == 0:
+        return np.zeros(0, dtype=bool)
+
     diff = np.abs(np.diff(signal, prepend=signal[0]))
     # Efficient rolling std using pandas
     try:
         import pandas as pd
-        local_std = pd.Series(signal).rolling(window, min_periods=1).std().to_numpy()
+        local_std = pd.Series(signal).rolling(window, min_periods=2).std(ddof=0).to_numpy()
     except ImportError:
         # Fallback to slower method if pandas not available
         if len(signal) < window:
@@ -115,6 +118,13 @@ def detect_motion_artifacts(signal: np.ndarray, window: int = 10, threshold: flo
                 np.std(signal[max(0, i-window):i+1]) if i > 0 else np.std(signal[:1])
                 for i in range(len(signal))
             ])
+
+    # Prevent very small local std at plateaus from flagging normal inhale/exhale starts.
+    global_std = np.std(signal) if len(signal) > 1 else 0.0
+    std_floor = max(global_std * 0.25, 1e-4)
+    local_std = np.nan_to_num(local_std, nan=global_std)
+    local_std = np.maximum(local_std, std_floor)
+
     artifact_mask = diff > threshold * local_std
     return artifact_mask
 
@@ -162,62 +172,6 @@ def get_high_pass_filter_coeffs(cutoff: float, fs: float, order: int = 5, initia
 def high_pass_filter_sample(sample: float, sos, zi):
     """
     Filter a single sample with stateful processing.
-    Uses second-order sections (SOS) for improved numerical stability.
-
-    :param sample: The new sample to filter.
-    :param sos: Second-order sections filter representation.
-    :param zi: Filter state.
-    :return: filtered_sample, updated_zi
-    """
-    filtered, zi = sosfilt(sos, [sample], zi=zi)
-    return filtered[0], zi
-
-
-# ------------------- Low-pass filter functions -------------------
-def low_pass_filter(data: np.ndarray, cutoff: float, fs: float, order: int = 4) -> np.ndarray:
-    """
-    Apply a low-pass filter to the data (batch mode).
-    Uses second-order sections (SOS) for improved numerical stability.
-
-    :param data: The input data to filter.
-    :param cutoff: The cutoff frequency in Hz.
-    :param fs: The sampling rate in Hz.
-    :param order: The order of the filter (default: 4).
-    :return: The filtered data.
-    """
-    nyquist = 0.5 * fs
-    normal_cutoff = cutoff / nyquist
-    if normal_cutoff >= 1.0 or normal_cutoff <= 0:
-        raise ValueError(f"Cutoff {cutoff} Hz invalid for sampling rate {fs} Hz")
-    sos = butter(order, normal_cutoff, btype='low', analog=False, output='sos')
-    return sosfilt(sos, data)
-
-
-def get_low_pass_filter_coeffs(cutoff: float, fs: float, order: int = 4, initial_value: float = None):
-    """
-    Get low-pass filter coefficients and initial state for real-time filtering.
-    Uses second-order sections (SOS) for improved numerical stability.
-
-    :param cutoff: The cutoff frequency in Hz.
-    :param fs: The sampling rate in Hz.
-    :param order: The order of the filter (default: 4).
-    :param initial_value: Optional first sample value to scale zi and avoid transients.
-    :return: sos, zi (second-order sections and initial state)
-    """
-    nyquist = 0.5 * fs
-    normal_cutoff = cutoff / nyquist
-    if normal_cutoff >= 1.0 or normal_cutoff <= 0:
-        raise ValueError(f"Cutoff {cutoff} Hz invalid for sampling rate {fs} Hz")
-    sos = butter(order, normal_cutoff, btype='low', analog=False, output='sos')
-    zi = sosfilt_zi(sos)
-    if initial_value is not None:
-        zi = zi * initial_value
-    return sos, zi
-
-
-def low_pass_filter_sample(sample: float, sos, zi):
-    """
-    Filter a single sample with stateful processing (low-pass).
     Uses second-order sections (SOS) for improved numerical stability.
 
     :param sample: The new sample to filter.
