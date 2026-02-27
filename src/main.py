@@ -29,6 +29,10 @@ spike_threshold = 2.5
 artifact_window = 10
 artifact_threshold = 3.5
 processing_context = 40  # Number of previous points to include for stable chunk processing
+# Light smoothing before artifact/peak-style decisions.
+# 10% of a ~4 s breathing cycle -> ~0.4 s smoothing window (about 30-50 samples at 100 Hz).
+estimated_breath_cycle_sec = 4.0
+smoothing_fraction_of_cycle = 0.10
 
 # Normalization reset interval
 reset_interval_sec = 20  # Reset min/max every x seconds
@@ -78,6 +82,12 @@ def acquire_data():
         from lslOut import LSLBreathingSender
         lsl_sender = LSLBreathingSender(nominal_srate=sampling_rate)
 
+        smoothing_window_samples = int(round(estimated_breath_cycle_sec * smoothing_fraction_of_cycle * sampling_rate))
+        if smoothing_window_samples < 3:
+            smoothing_window_samples = 3
+        if smoothing_window_samples % 2 == 0:
+            smoothing_window_samples += 1
+
         while not keyboard.is_pressed('c'):
             # Check for inhale ('i') and exhale ('o') key presses
             if keyboard.is_pressed('i') and not last_inhale:
@@ -122,8 +132,12 @@ def acquire_data():
                 context_len = min(processing_context, available_context)
                 # Include short history so chunk boundaries do not create false artifacts.
                 recent_hp = np.array(list(channel_1_hp)[-(chunk_len + context_len):], dtype=float)
-                recent_hp_processed = remove_spikes(
+                recent_hp_smoothed = smooth_signal(
                     recent_hp,
+                    window=smoothing_window_samples,
+                )
+                recent_hp_processed = remove_spikes(
+                    recent_hp_smoothed,
                     kernel_size=spike_kernel_size,
                     threshold=spike_threshold,
                 )

@@ -128,6 +128,36 @@ def detect_motion_artifacts(signal: np.ndarray, window: int = 10, threshold: flo
     artifact_mask = diff > threshold * local_std
     return artifact_mask
 
+
+def smooth_signal(signal: np.ndarray, window: int = 31) -> np.ndarray:
+    """
+    Apply light moving-average smoothing with edge padding.
+    Intended for preprocessing before artifact or peak decisions.
+
+    :param signal: 1D numpy array of the signal
+    :param window: Smoothing window in samples (odd integer preferred)
+    :return: Smoothed signal with same length as input
+    """
+    signal = np.asarray(signal, dtype=float)
+    if signal.size < 3:
+        return signal.copy()
+
+    win = int(window)
+    if win <= 1:
+        return signal.copy()
+    if win > signal.size:
+        win = signal.size
+    if win % 2 == 0:
+        win -= 1
+    if win < 3:
+        return signal.copy()
+
+    kernel = np.ones(win, dtype=float) / float(win)
+    pad = win // 2
+    padded = np.pad(signal, (pad, pad), mode='edge')
+    return np.convolve(padded, kernel, mode='valid')
+
+
 def high_pass_filter(data: np.ndarray, cutoff: float, fs: float, order: int = 5) -> np.ndarray:
     """
     Apply a high-pass filter to the data (batch mode).
