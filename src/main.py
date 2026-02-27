@@ -19,7 +19,9 @@ chunk_size = 10  # Number of samples to read per chunk
 # Box breathing: 4s in + 4s hold + 4s out = 12s cycle = 0.083 Hz
 # Use a gentle first-order filter to reduce phase lag and rebound artifacts.
 hp_order = 1
-hp_cutoff = 0.015  # High-pass cutoff frequency in Hz
+# Lower cutoff increases hold stability (less decay toward 0.5 while paused).
+# 0.003 Hz -> ~53 s time constant, which keeps short breath holds near-constant.
+hp_cutoff = 0.003  # High-pass cutoff frequency in Hz
 
 # Artifact/spike processing parameters
 spike_kernel_size = 5
