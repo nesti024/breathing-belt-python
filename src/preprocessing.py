@@ -213,6 +213,62 @@ def high_pass_filter_sample(sample: float, sos, zi):
     return filtered[0], zi
 
 
+# ------------------- Low-pass filter functions -------------------
+def low_pass_filter(data: np.ndarray, cutoff: float, fs: float, order: int = 2) -> np.ndarray:
+    """
+    Apply a low-pass filter to the data (batch mode).
+    Uses second-order sections (SOS) for improved numerical stability.
+
+    :param data: The input data to filter.
+    :param cutoff: The cutoff frequency of the filter in Hz.
+    :param fs: The sampling rate in Hz.
+    :param order: The order of the filter (default: 2).
+    :return: The filtered data.
+    """
+    nyquist = 0.5 * fs
+    normal_cutoff = cutoff / nyquist
+    if normal_cutoff >= 1.0 or normal_cutoff <= 0:
+        raise ValueError(f"Cutoff {cutoff} Hz invalid for sampling rate {fs} Hz")
+    sos = butter(order, normal_cutoff, btype='low', analog=False, output='sos')
+    return sosfilt(sos, data)
+
+
+def get_low_pass_filter_coeffs(cutoff: float, fs: float, order: int = 2, initial_value: float = None):
+    """
+    Get low-pass filter coefficients and initial state for real-time filtering.
+    Uses second-order sections (SOS) for improved numerical stability.
+
+    :param cutoff: The cutoff frequency of the filter in Hz.
+    :param fs: The sampling rate in Hz.
+    :param order: The order of the filter (default: 2).
+    :param initial_value: Optional first sample value to scale zi and avoid transient artifacts.
+    :return: sos, zi (second-order sections and initial state)
+    """
+    nyquist = 0.5 * fs
+    normal_cutoff = cutoff / nyquist
+    if normal_cutoff >= 1.0 or normal_cutoff <= 0:
+        raise ValueError(f"Cutoff {cutoff} Hz invalid for sampling rate {fs} Hz")
+    sos = butter(order, normal_cutoff, btype='low', analog=False, output='sos')
+    zi = sosfilt_zi(sos)
+    if initial_value is not None:
+        zi = zi * initial_value
+    return sos, zi
+
+
+def low_pass_filter_sample(sample: float, sos, zi):
+    """
+    Filter a single sample with stateful processing (low-pass).
+    Uses second-order sections (SOS) for improved numerical stability.
+
+    :param sample: The new sample to filter.
+    :param sos: Second-order sections filter representation.
+    :param zi: Filter state.
+    :return: filtered_sample, updated_zi
+    """
+    filtered, zi = sosfilt(sos, [sample], zi=zi)
+    return filtered[0], zi
+
+
 # ------------------- Band-pass filter functions -------------------
 def band_pass_filter(data: np.ndarray, lowcut: float, highcut: float, fs: float, order: int = 4) -> np.ndarray:
     """

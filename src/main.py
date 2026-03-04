@@ -3,11 +3,16 @@ import keyboard  # Import the keyboard module
 import traceback
 from collections import deque
 
-from calibration import CalibrationConfig, normalize_sample, run_range_calibration
+from calibration import (
+    AdaptiveRangeConfig,
+    CalibrationConfig,
+    initialize_adaptive_range,
+    run_range_calibration,
+    update_adaptive_range,
+)
 from connect import *
 from preprocessing import *
 from plot import *
-import matplotlib.pyplot as plt
 import numpy as np
 
 # Replace with your BITalino's MAC address
@@ -16,13 +21,13 @@ sampling_rate = 100  # Sampling rate in Hz
 # Lower chunk size to reduce end-to-end latency in the live signal.
 chunk_size = 10  # Number of samples to read per chunk
 
-# High-pass filter parameters for drift suppression and stable baseline
-# Box breathing: 4s in + 4s hold + 4s out = 12s cycle = 0.083 Hz
-# Use a gentle first-order filter to reduce phase lag and rebound artifacts.
+# Two-stage real-time filtering for hold stability:
+# 1) very-low high-pass for slow baseline drift suppression
+# 2) low-pass for respiration band cleanup
+hp_cutoff_hz = 0.005
 hp_order = 1
-# Lower cutoff increases hold stability (less decay toward 0.5 while paused).
-# 0.003 Hz -> ~53 s time constant, which keeps short breath holds near-constant.
-hp_cutoff = 0.003  # High-pass cutoff frequency in Hz
+lp_cutoff_hz = 1.0
+lp_order = 2
 
 # Artifact/spike processing parameters
 spike_kernel_size = 5
@@ -31,15 +36,26 @@ artifact_window = 10
 artifact_threshold = 3.5
 processing_context = 40  # Number of previous points to include for stable chunk processing
 # Light smoothing before artifact/peak-style decisions.
-# 10% of a ~4 s breathing cycle -> ~0.4 s smoothing window (about 30-50 samples at 100 Hz).
-estimated_breath_cycle_sec = 4.0
-smoothing_fraction_of_cycle = 0.10
+smoothing_window_ms = 400
 
 # One-time robust range calibration settings
 calibration_duration_sec = 15.0
 calibration_percentile_lo = 5.0
 calibration_percentile_hi = 95.0
 calibration_amplitude_floor = 1e-3
+
+# Slow adaptive map update settings (minutes scale).
+adaptive_center_enabled = False
+adaptive_center_tau_sec = 600.0
+adaptive_amplitude_tau_sec = 120.0
+
+# Freeze adaptation while signal activity stays very low (breath holds).
+# Activity metric: smoothed |dx/dt| over a 1-second window.
+hold_activity_window_ms = 1000
+hold_activity_ratio_per_sec_enter = 1.0
+hold_activity_ratio_per_sec_exit = 1.5
+hold_activity_floor_per_sec = 0.01
+
 # Debug: print min/max of the exact plot window once per second.
 debug_plot_window_bounds = True
 
@@ -60,8 +76,8 @@ def acquire_data():
         # Prepare rolling buffers for data storage (auto-trim to max length)
         sample_indices = deque(maxlen=1000)
         channel_1_raw = deque(maxlen=1000)
-        channel_1_hp = deque(maxlen=1000)
-        channel_1_hp_processed = deque(maxlen=1000)  # For processed signal after artifact removal
+        channel_1_filtered = deque(maxlen=1000)
+        channel_1_filtered_processed = deque(maxlen=1000)  # For processed signal after artifact removal
         normalized_signal = deque(maxlen=1000)
         sample_count = 0
         # Store inhale/exhale events as (sample_index, event_type)
@@ -74,6 +90,7 @@ def acquire_data():
 
         # Filter coefficients will be initialized lazily with the first sample
         sos_hp, zi_1_hp = None, None
+        sos_lp, zi_1_lp = None, None
         filter_initialized = False
         
         last_inhale = False
@@ -85,11 +102,16 @@ def acquire_data():
         from lslOut import LSLBreathingSender
         lsl_sender = LSLBreathingSender(nominal_srate=sampling_rate)
 
-        smoothing_window_samples = int(round(estimated_breath_cycle_sec * smoothing_fraction_of_cycle * sampling_rate))
+        smoothing_window_samples = int(round((smoothing_window_ms / 1000.0) * sampling_rate))
         if smoothing_window_samples < 3:
             smoothing_window_samples = 3
         if smoothing_window_samples % 2 == 0:
             smoothing_window_samples += 1
+        hold_activity_window_samples = int(round((hold_activity_window_ms / 1000.0) * sampling_rate))
+        hold_activity_window_samples = max(3, hold_activity_window_samples)
+        recent_abs_velocity = deque(maxlen=hold_activity_window_samples)
+        previous_cleaned_value = None
+        hold_mode_active = False
 
         # Calibrate on the same processed signal path used at runtime.
         calibration_cfg = CalibrationConfig(
@@ -97,9 +119,15 @@ def acquire_data():
             fs_hz=float(sampling_rate),
             percentile_lo=calibration_percentile_lo,
             percentile_hi=calibration_percentile_hi,
-            # Processed high-pass signal is not in ADC units; disable rail checks here.
+            # Processed signal is not in ADC units; disable rail checks here.
             saturation_lo=float("-inf"),
             saturation_hi=float("inf"),
+            amplitude_floor=calibration_amplitude_floor,
+        )
+        adaptive_cfg = AdaptiveRangeConfig(
+            fs_hz=float(sampling_rate),
+            center_tau_s=adaptive_center_tau_sec,
+            amplitude_tau_s=adaptive_amplitude_tau_sec,
             amplitude_floor=calibration_amplitude_floor,
         )
         calibration_target_samples = max(
@@ -108,6 +136,7 @@ def acquire_data():
         )
         calibration_samples: list[float] = []
         calibration_result = None
+        adaptive_state = None
         calibration_last_reported_sec = -1
 
         print(
@@ -116,41 +145,41 @@ def acquire_data():
         )
         print("Breathe normally and include full inhale/exhale range.")
 
-        def build_cleaned_chunk(chunk_len: int) -> np.ndarray:
+        def build_cleaned_chunk(chunk_len: int) -> tuple[np.ndarray, np.ndarray]:
             """Apply smoothing, spike removal, artifact masking and interpolation."""
-            available_context = max(0, len(channel_1_hp) - chunk_len)
+            available_context = max(0, len(channel_1_filtered) - chunk_len)
             context_len = min(processing_context, available_context)
             # Include short history so chunk boundaries do not create false artifacts.
-            recent_hp = np.array(
-                list(channel_1_hp)[-(chunk_len + context_len):],
+            recent_filtered = np.array(
+                list(channel_1_filtered)[-(chunk_len + context_len):],
                 dtype=float,
             )
-            recent_hp_smoothed = smooth_signal(
-                recent_hp,
+            recent_filtered_smoothed = smooth_signal(
+                recent_filtered,
                 window=smoothing_window_samples,
             )
-            recent_hp_processed = remove_spikes(
-                recent_hp_smoothed,
+            recent_filtered_processed = remove_spikes(
+                recent_filtered_smoothed,
                 kernel_size=spike_kernel_size,
                 threshold=spike_threshold,
             )
 
             # Motion artifact detection on the cleaned chunk.
             # For very short chunks, skip artifact detection to avoid unstable early estimates.
-            if len(recent_hp_processed) >= artifact_window:
+            if len(recent_filtered_processed) >= artifact_window:
                 artifact_mask = detect_motion_artifacts(
-                    recent_hp_processed,
+                    recent_filtered_processed,
                     window=artifact_window,
                     threshold=artifact_threshold,
                 )
             else:
-                artifact_mask = np.zeros_like(recent_hp_processed, dtype=bool)
+                artifact_mask = np.zeros_like(recent_filtered_processed, dtype=bool)
 
             # Mark artifacts as NaN and interpolate adaptively.
-            recent_hp_artifact = recent_hp_processed.copy()
-            recent_hp_artifact[artifact_mask] = np.nan
-            recent_hp_interp = interpolate_artifacts(recent_hp_artifact)
-            return recent_hp_interp[-chunk_len:]
+            recent_filtered_artifact = recent_filtered_processed.copy()
+            recent_filtered_artifact[artifact_mask] = np.nan
+            recent_filtered_interp = interpolate_artifacts(recent_filtered_artifact)
+            return recent_filtered_interp[-chunk_len:], artifact_mask[-chunk_len:]
 
         while not keyboard.is_pressed('c'):
             # Check for inhale ('i') and exhale ('o') key presses
@@ -178,21 +207,38 @@ def acquire_data():
 
                 # Lazy initialization: initialize filter with first sample value to avoid transients
                 if not filter_initialized:
-                    sos_hp, zi_1_hp = get_high_pass_filter_coeffs(hp_cutoff, sampling_rate, hp_order, initial_value=raw_sensor_1)
+                    sos_hp, zi_1_hp = get_high_pass_filter_coeffs(
+                        hp_cutoff_hz,
+                        sampling_rate,
+                        hp_order,
+                        initial_value=raw_sensor_1,
+                    )
+                    # High-pass output is centered around zero, so seed low-pass at zero.
+                    sos_lp, zi_1_lp = get_low_pass_filter_coeffs(
+                        lp_cutoff_hz,
+                        sampling_rate,
+                        lp_order,
+                        initial_value=0.0,
+                    )
                     filter_initialized = True
 
-                # Apply stateful high-pass filtering directly to the raw sample
+                # Apply high-pass + low-pass cascade directly to the raw sample.
                 filtered_sensor_1_hp, zi_1_hp = high_pass_filter_sample(raw_sensor_1, sos_hp, zi_1_hp)
+                filtered_sensor_1_filtered, zi_1_lp = low_pass_filter_sample(
+                    filtered_sensor_1_hp,
+                    sos_lp,
+                    zi_1_lp,
+                )
                 # Invert signal: sensor decreases when chest expands, so flip it
-                filtered_sensor_1_hp = -filtered_sensor_1_hp
-                channel_1_hp.append(filtered_sensor_1_hp)
+                filtered_sensor_1_filtered = -filtered_sensor_1_filtered
+                channel_1_filtered.append(filtered_sensor_1_filtered)
                 channel_1_raw.append(raw_sensor_1)
 
-            chunk_len = min(len(data), len(channel_1_hp))
+            chunk_len = min(len(data), len(channel_1_filtered))
             if chunk_len <= 0:
                 continue
 
-            cleaned_chunk = build_cleaned_chunk(chunk_len)
+            cleaned_chunk, artifact_mask_chunk = build_cleaned_chunk(chunk_len)
             if cleaned_chunk.size == 0:
                 continue
 
@@ -217,6 +263,11 @@ def acquire_data():
                     calibration_samples,
                     calibration_cfg,
                 )
+                adaptive_state = initialize_adaptive_range(
+                    calibration_samples,
+                    calibration_result,
+                    adaptive_cfg,
+                )
                 print("Calibration complete.")
                 print(
                     "Calibration map: "
@@ -235,24 +286,65 @@ def acquire_data():
                 # Start live output fresh after calibration.
                 sample_indices.clear()
                 channel_1_raw.clear()
-                channel_1_hp.clear()
-                channel_1_hp_processed.clear()
+                channel_1_filtered.clear()
+                channel_1_filtered_processed.clear()
                 normalized_signal.clear()
                 breath_events.clear()
+                recent_abs_velocity.clear()
+                previous_cleaned_value = None
+                hold_mode_active = False
                 sample_count = 0
                 continue
 
-            # Runtime: fixed calibration map (no live min/max adaptation).
-            channel_1_hp_processed.extend(cleaned_chunk)
-            normalized_chunk = [
-                normalize_sample(
-                    x=float(value),
-                    center=calibration_result.center,
-                    amplitude=calibration_result.amplitude,
-                    clamp=True,
+            if adaptive_state is None:
+                continue
+
+            # Runtime: adaptive normalization map with artifact-gated updates.
+            channel_1_filtered_processed.extend(cleaned_chunk)
+            normalized_chunk = []
+            for value, is_artifact in zip(cleaned_chunk, artifact_mask_chunk):
+                value_float = float(value)
+                if previous_cleaned_value is None:
+                    abs_velocity = 0.0
+                else:
+                    abs_velocity = abs(value_float - previous_cleaned_value) * sampling_rate
+                previous_cleaned_value = value_float
+                recent_abs_velocity.append(abs_velocity)
+
+                if len(recent_abs_velocity) < recent_abs_velocity.maxlen:
+                    activity_value = float("inf")
+                else:
+                    activity_value = float(np.mean(recent_abs_velocity))
+
+                enter_threshold = max(
+                    hold_activity_floor_per_sec,
+                    adaptive_state.amplitude * hold_activity_ratio_per_sec_enter,
                 )
-                for value in cleaned_chunk
-            ]
+                exit_threshold = max(
+                    hold_activity_floor_per_sec,
+                    adaptive_state.amplitude * hold_activity_ratio_per_sec_exit,
+                )
+
+                # Hold detection with hysteresis:
+                # - enter hold when activity stays below enter threshold
+                # - exit hold only after crossing the higher exit threshold
+                if not hold_mode_active:
+                    if len(recent_abs_velocity) >= recent_abs_velocity.maxlen:
+                        hold_mode_active = activity_value < enter_threshold
+                elif activity_value > exit_threshold:
+                    hold_mode_active = False
+
+                allow_amplitude_update = (not bool(is_artifact)) and (not hold_mode_active)
+                allow_center_update = allow_amplitude_update and adaptive_center_enabled
+                normalized_value, adaptive_state = update_adaptive_range(
+                    x=value_float,
+                    state=adaptive_state,
+                    cfg=adaptive_cfg,
+                    allow_update=allow_amplitude_update or allow_center_update,
+                    allow_center_update=allow_center_update,
+                    allow_amplitude_update=allow_amplitude_update,
+                )
+                normalized_chunk.append(normalized_value)
             normalized_signal.extend(normalized_chunk)
             normalized_array = np.asarray(normalized_signal, dtype=float)
 

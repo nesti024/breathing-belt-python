@@ -13,6 +13,7 @@ samples to a normalized VR control signal in ``[0, 1]``.
 from __future__ import annotations
 
 from dataclasses import dataclass
+import math
 import time
 from typing import Callable
 
@@ -58,6 +59,26 @@ class CalibrationResult:
     saturated_count: int
     lo_idx: int
     hi_idx: int
+
+
+@dataclass(frozen=True)
+class AdaptiveRangeConfig:
+    """Configuration for slow adaptive range tracking during runtime."""
+
+    fs_hz: float
+    center_tau_s: float = 180.0
+    amplitude_tau_s: float = 300.0
+    amplitude_floor: float = 1e-6
+
+
+@dataclass(frozen=True)
+class AdaptiveRangeState:
+    """Runtime state for adaptive center/amplitude normalization."""
+
+    center: float
+    amplitude: float
+    abs_dev_ema: float
+    abs_dev_to_amplitude_scale: float
 
 
 def run_range_calibration(
@@ -147,6 +168,100 @@ def normalize_sample(
     if clamp:
         return float(min(1.0, max(0.0, y)))
     return float(y)
+
+
+def initialize_adaptive_range(
+    samples: list[float] | np.ndarray,
+    calibration_result: CalibrationResult,
+    cfg: AdaptiveRangeConfig,
+) -> AdaptiveRangeState:
+    """Seed adaptive range state from robust calibration outputs."""
+
+    if cfg.fs_hz <= 0.0:
+        raise ValueError("fs_hz must be positive.")
+    if cfg.amplitude_floor <= 0.0:
+        raise ValueError("amplitude_floor must be positive.")
+
+    arr = np.asarray(samples, dtype=float).reshape(-1)
+    if arr.size == 0:
+        raise ValueError("initialize_adaptive_range requires at least one sample.")
+
+    center = float(calibration_result.center)
+    amplitude = max(float(calibration_result.amplitude), float(cfg.amplitude_floor))
+
+    abs_dev_ema = float(np.mean(np.abs(arr - center)))
+    eps = 1e-12
+    abs_dev_to_amplitude_scale = amplitude / max(abs_dev_ema, eps)
+
+    return AdaptiveRangeState(
+        center=center,
+        amplitude=amplitude,
+        abs_dev_ema=abs_dev_ema,
+        abs_dev_to_amplitude_scale=abs_dev_to_amplitude_scale,
+    )
+
+
+def update_adaptive_range(
+    x: float,
+    state: AdaptiveRangeState,
+    cfg: AdaptiveRangeConfig,
+    allow_update: bool = True,
+    allow_center_update: bool | None = None,
+    allow_amplitude_update: bool | None = None,
+) -> tuple[float, AdaptiveRangeState]:
+    """Normalize one sample and optionally update adaptive map parameters."""
+
+    if cfg.fs_hz <= 0.0:
+        raise ValueError("fs_hz must be positive.")
+    if cfg.amplitude_floor <= 0.0:
+        raise ValueError("amplitude_floor must be positive.")
+
+    normalized = normalize_sample(
+        x=float(x),
+        center=state.center,
+        amplitude=max(state.amplitude, cfg.amplitude_floor),
+        clamp=True,
+    )
+    if allow_center_update is None:
+        allow_center_update = allow_update
+    if allow_amplitude_update is None:
+        allow_amplitude_update = allow_update
+
+    if not allow_center_update and not allow_amplitude_update:
+        return normalized, state
+
+    if allow_center_update:
+        if cfg.center_tau_s <= 0.0:
+            alpha_center = 1.0
+        else:
+            alpha_center = 1.0 - math.exp(-1.0 / (cfg.fs_hz * cfg.center_tau_s))
+        updated_center = state.center + alpha_center * (x - state.center)
+    else:
+        updated_center = state.center
+
+    if allow_amplitude_update:
+        if cfg.amplitude_tau_s <= 0.0:
+            alpha_amp = 1.0
+        else:
+            alpha_amp = 1.0 - math.exp(-1.0 / (cfg.fs_hz * cfg.amplitude_tau_s))
+        updated_abs_dev_ema = state.abs_dev_ema + alpha_amp * (
+            abs(x - updated_center) - state.abs_dev_ema
+        )
+        updated_amplitude = max(
+            updated_abs_dev_ema * state.abs_dev_to_amplitude_scale,
+            cfg.amplitude_floor,
+        )
+    else:
+        updated_abs_dev_ema = state.abs_dev_ema
+        updated_amplitude = max(state.amplitude, cfg.amplitude_floor)
+
+    updated_state = AdaptiveRangeState(
+        center=float(updated_center),
+        amplitude=float(updated_amplitude),
+        abs_dev_ema=float(updated_abs_dev_ema),
+        abs_dev_to_amplitude_scale=float(state.abs_dev_to_amplitude_scale),
+    )
+    return normalized, updated_state
 
 
 def collect_samples(
