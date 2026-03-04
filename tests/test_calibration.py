@@ -66,3 +66,30 @@ def test_amplitude_floor_for_constant_signal() -> None:
     assert result.center == 7.5
     assert result.amplitude == 0.25
     assert normalize_sample(7.5, result.center, result.amplitude) == 0.5
+
+
+def test_normalize_sample_clamps_outside_calibrated_range() -> None:
+    assert normalize_sample(-10.0, center=0.0, amplitude=1.0, clamp=True) == 0.0
+    assert normalize_sample(10.0, center=0.0, amplitude=1.0, clamp=True) == 1.0
+
+
+def test_fixed_calibration_stream_normalization_is_bounded() -> None:
+    fs_hz = 100.0
+    t = np.arange(0.0, 12.0, 1.0 / fs_hz)
+    calibration_samples = np.sin(2.0 * np.pi * 0.22 * t)
+    cfg = CalibrationConfig(fs_hz=fs_hz, percentile_lo=5.0, percentile_hi=95.0)
+    result = run_range_calibration(calibration_samples, cfg)
+
+    # Simulate runtime breaths with larger amplitude than during calibration.
+    runtime_samples = 1.8 * np.sin(2.0 * np.pi * 0.22 * t)
+    normalized = np.array(
+        [
+            normalize_sample(float(x), result.center, result.amplitude, clamp=True)
+            for x in runtime_samples
+        ]
+    )
+
+    assert np.all(normalized >= 0.0)
+    assert np.all(normalized <= 1.0)
+    assert np.any(normalized == 0.0)
+    assert np.any(normalized == 1.0)

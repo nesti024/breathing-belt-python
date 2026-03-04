@@ -1,4 +1,5 @@
 import matplotlib.pyplot as plt
+import numpy as np
 
 def plot_breathing_channel(channel_data, time=None, live=False, ax=None, line=None, blit_manager=None):
 	"""
@@ -13,6 +14,8 @@ def plot_breathing_channel(channel_data, time=None, live=False, ax=None, line=No
 	"""
 	# Always plot only the last 200 points
 	channel_data = channel_data[-200:]
+	# Keep plotted values inside the visible normalization range.
+	channel_data = np.clip(np.asarray(channel_data, dtype=float), 0.0, 1.0)
 	if time is not None:
 		time = time[-200:]
 	if live and ax is not None and line is not None:
@@ -24,10 +27,8 @@ def plot_breathing_channel(channel_data, time=None, live=False, ax=None, line=No
 			ax.set_xlim(0, max(len(channel_data)-1, 1))
 		line.set_ydata(channel_data)
 		ax.set_ylim(0, 1)
-		if blit_manager is not None:
-			blit_manager.update()
-		else:
-			plt.pause(0.001)  # Only process GUI events, do not call plt.show()
+		# Use regular redraw for scrolling axes; blitting can leave stale pixels.
+		plt.pause(0.001)  # Only process GUI events, do not call plt.show()
 	else:
 		plt.figure(figsize=(10, 4))
 		if time is not None:
@@ -55,11 +56,8 @@ def setup_live_plot(title='Breathing Belt Channel Visualization'):
 	plt.tight_layout()
 	plt.show(block=False)  # Show the window immediately
 	plt.pause(0.01)  # Give time for window to appear
-	# Blitting for fast updates
-	try:
-		blit_manager = BlitManager(fig.canvas, [line])
-	except Exception:
-		blit_manager = None
+	# Disabled for scrolling x-limits to avoid stale/ghost rendering artifacts.
+	blit_manager = None
 	return fig, ax, line, blit_manager
 
 

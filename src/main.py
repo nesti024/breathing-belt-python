@@ -3,6 +3,7 @@ import keyboard  # Import the keyboard module
 import traceback
 from collections import deque
 
+from calibration import CalibrationConfig, normalize_sample, run_range_calibration
 from connect import *
 from preprocessing import *
 from plot import *
@@ -34,8 +35,13 @@ processing_context = 40  # Number of previous points to include for stable chunk
 estimated_breath_cycle_sec = 4.0
 smoothing_fraction_of_cycle = 0.10
 
-# Normalization reset interval
-reset_interval_sec = 20  # Reset min/max every x seconds
+# One-time robust range calibration settings
+calibration_duration_sec = 15.0
+calibration_percentile_lo = 5.0
+calibration_percentile_hi = 95.0
+calibration_amplitude_floor = 1e-3
+# Debug: print min/max of the exact plot window once per second.
+debug_plot_window_bounds = True
 
 
 def acquire_data():
@@ -56,8 +62,9 @@ def acquire_data():
         channel_1_raw = deque(maxlen=1000)
         channel_1_hp = deque(maxlen=1000)
         channel_1_hp_processed = deque(maxlen=1000)  # For processed signal after artifact removal
+        normalized_signal = deque(maxlen=1000)
         sample_count = 0
-            # Store inhale/exhale events as (sample_index, event_type)
+        # Store inhale/exhale events as (sample_index, event_type)
         breath_events = []  # event_type: 'in' or 'out'
 
 
@@ -74,10 +81,6 @@ def acquire_data():
 
         print("Press 'c' to stop acquisition.")
 
-        # Initialize min/max tracker for normalization
-        # Keep this aligned with `reset_interval_sec`.
-        minmax_tracker = MaxMinTracker(reset_interval_sec)
-
         # Initialize LSL sender
         from lslOut import LSLBreathingSender
         lsl_sender = LSLBreathingSender(nominal_srate=sampling_rate)
@@ -87,6 +90,67 @@ def acquire_data():
             smoothing_window_samples = 3
         if smoothing_window_samples % 2 == 0:
             smoothing_window_samples += 1
+
+        # Calibrate on the same processed signal path used at runtime.
+        calibration_cfg = CalibrationConfig(
+            duration_s=calibration_duration_sec,
+            fs_hz=float(sampling_rate),
+            percentile_lo=calibration_percentile_lo,
+            percentile_hi=calibration_percentile_hi,
+            # Processed high-pass signal is not in ADC units; disable rail checks here.
+            saturation_lo=float("-inf"),
+            saturation_hi=float("inf"),
+            amplitude_floor=calibration_amplitude_floor,
+        )
+        calibration_target_samples = max(
+            1,
+            int(round(calibration_cfg.duration_s * calibration_cfg.fs_hz)),
+        )
+        calibration_samples: list[float] = []
+        calibration_result = None
+        calibration_last_reported_sec = -1
+
+        print(
+            f"Starting startup calibration for {calibration_cfg.duration_s:.1f}s "
+            f"({calibration_target_samples} processed samples)."
+        )
+        print("Breathe normally and include full inhale/exhale range.")
+
+        def build_cleaned_chunk(chunk_len: int) -> np.ndarray:
+            """Apply smoothing, spike removal, artifact masking and interpolation."""
+            available_context = max(0, len(channel_1_hp) - chunk_len)
+            context_len = min(processing_context, available_context)
+            # Include short history so chunk boundaries do not create false artifacts.
+            recent_hp = np.array(
+                list(channel_1_hp)[-(chunk_len + context_len):],
+                dtype=float,
+            )
+            recent_hp_smoothed = smooth_signal(
+                recent_hp,
+                window=smoothing_window_samples,
+            )
+            recent_hp_processed = remove_spikes(
+                recent_hp_smoothed,
+                kernel_size=spike_kernel_size,
+                threshold=spike_threshold,
+            )
+
+            # Motion artifact detection on the cleaned chunk.
+            # For very short chunks, skip artifact detection to avoid unstable early estimates.
+            if len(recent_hp_processed) >= artifact_window:
+                artifact_mask = detect_motion_artifacts(
+                    recent_hp_processed,
+                    window=artifact_window,
+                    threshold=artifact_threshold,
+                )
+            else:
+                artifact_mask = np.zeros_like(recent_hp_processed, dtype=bool)
+
+            # Mark artifacts as NaN and interpolate adaptively.
+            recent_hp_artifact = recent_hp_processed.copy()
+            recent_hp_artifact[artifact_mask] = np.nan
+            recent_hp_interp = interpolate_artifacts(recent_hp_artifact)
+            return recent_hp_interp[-chunk_len:]
 
         while not keyboard.is_pressed('c'):
             # Check for inhale ('i') and exhale ('o') key presses
@@ -124,73 +188,103 @@ def acquire_data():
                 channel_1_hp.append(filtered_sensor_1_hp)
                 channel_1_raw.append(raw_sensor_1)
 
-            # Apply spike removal and motion artifact detection before normalization.
-            # Process exactly the newly received chunk.
             chunk_len = min(len(data), len(channel_1_hp))
-            if chunk_len > 0:
-                available_context = max(0, len(channel_1_hp) - chunk_len)
-                context_len = min(processing_context, available_context)
-                # Include short history so chunk boundaries do not create false artifacts.
-                recent_hp = np.array(list(channel_1_hp)[-(chunk_len + context_len):], dtype=float)
-                recent_hp_smoothed = smooth_signal(
-                    recent_hp,
-                    window=smoothing_window_samples,
-                )
-                recent_hp_processed = remove_spikes(
-                    recent_hp_smoothed,
-                    kernel_size=spike_kernel_size,
-                    threshold=spike_threshold,
-                )
+            if chunk_len <= 0:
+                continue
 
-                # Motion artifact detection on the cleaned chunk.
-                # For very short chunks, skip artifact detection to avoid unstable early estimates.
-                if len(recent_hp_processed) >= artifact_window:
-                    artifact_mask = detect_motion_artifacts(
-                        recent_hp_processed,
-                        window=artifact_window,
-                        threshold=artifact_threshold,
+            cleaned_chunk = build_cleaned_chunk(chunk_len)
+            if cleaned_chunk.size == 0:
+                continue
+
+            # Startup robust calibration phase.
+            if calibration_result is None:
+                calibration_samples.extend(float(value) for value in cleaned_chunk)
+                collected = len(calibration_samples)
+                clipped_collected = min(collected, calibration_target_samples)
+                reported_sec = int(clipped_collected / calibration_cfg.fs_hz)
+                if reported_sec != calibration_last_reported_sec:
+                    calibration_last_reported_sec = reported_sec
+                    print(
+                        f"Calibration progress: {clipped_collected}/"
+                        f"{calibration_target_samples} samples"
                     )
-                else:
-                    artifact_mask = np.zeros_like(recent_hp_processed, dtype=bool)
 
-                # Mark artifacts as NaN
-                recent_hp_artifact = recent_hp_processed.copy()
-                recent_hp_artifact[artifact_mask] = np.nan
-                # Adaptive interpolation over artifacts
-                recent_hp_interp = interpolate_artifacts(recent_hp_artifact)
-                cleaned_chunk = recent_hp_interp[-chunk_len:]
+                if collected < calibration_target_samples:
+                    continue
 
-                # Use rolling buffer - automatically handles trimming
-                channel_1_hp_processed.extend(cleaned_chunk)
+                calibration_samples = calibration_samples[:calibration_target_samples]
+                calibration_result = run_range_calibration(
+                    calibration_samples,
+                    calibration_cfg,
+                )
+                print("Calibration complete.")
+                print(
+                    "Calibration map: "
+                    f"center={calibration_result.center:.6f}, "
+                    f"amplitude={calibration_result.amplitude:.6f}, "
+                    f"min={calibration_result.global_min:.6f}, "
+                    f"max={calibration_result.global_max:.6f}"
+                )
+                if calibration_result.saturated:
+                    print(
+                        "WARNING: Calibration saturation detected "
+                        f"({calibration_result.saturated_count}/"
+                        f"{calibration_result.n_samples} samples at rails)."
+                    )
 
-                # Update normalization tracker using the cleaned/interpolated values.
-                for cleaned_value in cleaned_chunk:
-                    minmax_tracker.update(float(cleaned_value))
+                # Start live output fresh after calibration.
+                sample_indices.clear()
+                channel_1_raw.clear()
+                channel_1_hp.clear()
+                channel_1_hp_processed.clear()
+                normalized_signal.clear()
+                breath_events.clear()
+                sample_count = 0
+                continue
 
-                # Vectorized normalization (much faster than list comprehension)
-                max_val, min_val = minmax_tracker.get_max_min()
-                processed_array = np.array(list(channel_1_hp_processed))
-                
-                if max_val is not None and min_val is not None and (max_val - min_val) > 0.001:
-                    normalized_interp = (processed_array - min_val) / (max_val - min_val)
-                else:
-                    # Fallback: return 0.5 (centered) if range is invalid
-                    normalized_interp = np.full_like(processed_array, 0.5)
+            # Runtime: fixed calibration map (no live min/max adaptation).
+            channel_1_hp_processed.extend(cleaned_chunk)
+            normalized_chunk = [
+                normalize_sample(
+                    x=float(value),
+                    center=calibration_result.center,
+                    amplitude=calibration_result.amplitude,
+                    clamp=True,
+                )
+                for value in cleaned_chunk
+            ]
+            normalized_signal.extend(normalized_chunk)
+            normalized_array = np.asarray(normalized_signal, dtype=float)
 
-                # Plot the normalized, processed signal (last 200 points)
-                n_plot = min(200, len(normalized_interp), len(sample_indices))
+            # Plot the normalized signal (last 200 points).
+            n_plot = min(200, len(normalized_array), len(sample_indices))
+            if n_plot > 0:
+                plot_window = normalized_array[-n_plot:]
+                window_min = float(np.min(plot_window))
+                window_max = float(np.max(plot_window))
+                if debug_plot_window_bounds and (sample_count % sampling_rate) < chunk_len:
+                    print(
+                        f"Plot window range check: min={window_min:.4f}, "
+                        f"max={window_max:.4f}, points={n_plot}"
+                    )
+                if window_min < 0.0 or window_max > 1.0:
+                    print(
+                        "WARNING: plotted window out of [0,1] "
+                        f"(min={window_min:.6f}, max={window_max:.6f})"
+                    )
+
                 plot_breathing_channel(
-                    normalized_interp[-n_plot:],
+                    plot_window,
                     list(sample_indices)[-n_plot:],
                     live=True, ax=ax_final, line=line_final, blit_manager=blit_manager_final)
-                
-                # Send and print only the newest normalized data point
-                if len(normalized_interp) > 0:
-                    newest_value = normalized_interp[-1]
-                    print(f"Normalized: {newest_value:.4f}")
-                    # Send every newly processed point to reduce output stair-stepping.
-                    for value in normalized_interp[-chunk_len:]:
-                        lsl_sender.send(float(value))
+            
+            # Send and print only the newest normalized data point.
+            if normalized_chunk:
+                newest_value = normalized_chunk[-1]
+                print(f"Normalized: {newest_value:.4f}")
+                # Send every newly processed point to reduce output stair-stepping.
+                for value in normalized_chunk:
+                    lsl_sender.send(float(value))
 
 
         # Stop acquisition
