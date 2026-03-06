@@ -1,5 +1,6 @@
 import keyboard  # Import the keyboard module
 
+import time
 import traceback
 from collections import deque
 
@@ -64,14 +65,21 @@ def acquire_data():
     """
     Acquire data from two PLUX PZT sensors using a BITalino Corce.
     """
+    belt = None
     try:
-        # Connect to the BITalino device
-        device = connect_device(mac_address)
-
-        # Start acquisition on channels 0 and 1 (assuming PZT sensors are connected to these channels)
         print("Starting acquisition...")
-        start_acquisition(device, sampling_rate, [0, 1])
-
+        belt = BreathBelt(
+            mac_address=mac_address,
+            sampling_rate=sampling_rate,
+            channels=(0, 1),
+            read_chunk_size=chunk_size,
+            queue_max_samples=1000,
+            timeout_s=0.25,
+            read_error_backoff_s=0.05,
+            retries=3,
+            retry_delay_s=2.0,
+        )
+        belt.start()
 
         # Prepare rolling buffers for data storage (auto-trim to max length)
         sample_indices = deque(maxlen=1000)
@@ -196,8 +204,9 @@ def acquire_data():
             elif not keyboard.is_pressed('o'):
                 last_exhale = False
 
-            data = read_samples(device, chunk_size)  # Read chunk_size samples at a time
-            if data is None or len(data) == 0:
+            data = belt.get_all()
+            if data.size == 0:
+                time.sleep(0.001)
                 continue
 
             for sample in data:
@@ -377,20 +386,13 @@ def acquire_data():
                 # Send every newly processed point to reduce output stair-stepping.
                 for value in normalized_chunk:
                     lsl_sender.send(float(value))
-
-
-        # Stop acquisition
-        print("Stopping acquisition...")
-        stop_acquisition(device)
-
-        # Close the connection
-        close_device(device)
-        print("Connection closed.")
-
-    
-
     except Exception:
         traceback.print_exc()
+    finally:
+        print("Stopping acquisition...")
+        if belt is not None:
+            belt.stop()
+        print("Connection closed.")
 
 if __name__ == '__main__':
 
