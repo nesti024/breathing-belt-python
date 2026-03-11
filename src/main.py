@@ -46,9 +46,14 @@ calibration_percentile_hi = 95.0
 calibration_amplitude_floor = 1e-3
 
 # Slow adaptive map update settings (minutes scale).
-adaptive_center_enabled = False
+adaptive_center_enabled = True
 adaptive_center_tau_sec = 600.0
 adaptive_amplitude_tau_sec = 120.0
+
+# Fast post-calibration adaptation settings (seconds scale).
+adaptive_startup_duration_sec = 60.0
+adaptive_startup_center_tau_sec = 25.0
+adaptive_startup_amplitude_tau_sec = 25.0
 
 # Freeze adaptation while signal activity stays very low (breath holds).
 # Activity metric: smoothed |dx/dt| over a 1-second window.
@@ -132,12 +137,23 @@ def acquire_data():
             saturation_hi=float("inf"),
             amplitude_floor=calibration_amplitude_floor,
         )
-        adaptive_cfg = AdaptiveRangeConfig(
+        adaptive_cfg_startup = AdaptiveRangeConfig(
+            fs_hz=float(sampling_rate),
+            center_tau_s=adaptive_startup_center_tau_sec,
+            amplitude_tau_s=adaptive_startup_amplitude_tau_sec,
+            amplitude_floor=calibration_amplitude_floor,
+        )
+        adaptive_cfg_runtime = AdaptiveRangeConfig(
             fs_hz=float(sampling_rate),
             center_tau_s=adaptive_center_tau_sec,
             amplitude_tau_s=adaptive_amplitude_tau_sec,
             amplitude_floor=calibration_amplitude_floor,
         )
+        startup_target_samples = max(
+            1, int(round(adaptive_startup_duration_sec * sampling_rate))
+        )
+        runtime_processed_samples = 0
+        startup_mode_active = False
         calibration_target_samples = max(
             1,
             int(round(calibration_cfg.duration_s * calibration_cfg.fs_hz)),
@@ -275,7 +291,7 @@ def acquire_data():
                 adaptive_state = initialize_adaptive_range(
                     calibration_samples,
                     calibration_result,
-                    adaptive_cfg,
+                    adaptive_cfg_startup,
                 )
                 print("Calibration complete.")
                 print(
@@ -303,6 +319,12 @@ def acquire_data():
                 previous_cleaned_value = None
                 hold_mode_active = False
                 sample_count = 0
+                runtime_processed_samples = 0
+                startup_mode_active = True
+                print(
+                    "Starting fast post-calibration adaptation for "
+                    f"{adaptive_startup_duration_sec:.1f}s."
+                )
                 continue
 
             if adaptive_state is None:
@@ -345,15 +367,25 @@ def acquire_data():
 
                 allow_amplitude_update = (not bool(is_artifact)) and (not hold_mode_active)
                 allow_center_update = allow_amplitude_update and adaptive_center_enabled
+                active_cfg = (
+                    adaptive_cfg_startup if startup_mode_active else adaptive_cfg_runtime
+                )
                 normalized_value, adaptive_state = update_adaptive_range(
                     x=value_float,
                     state=adaptive_state,
-                    cfg=adaptive_cfg,
+                    cfg=active_cfg,
                     allow_update=allow_amplitude_update or allow_center_update,
                     allow_center_update=allow_center_update,
                     allow_amplitude_update=allow_amplitude_update,
                 )
                 normalized_chunk.append(normalized_value)
+                runtime_processed_samples += 1
+                if startup_mode_active and runtime_processed_samples >= startup_target_samples:
+                    startup_mode_active = False
+                    print(
+                        "Startup adaptation complete. "
+                        "Switched to slow runtime tracking."
+                    )
             normalized_signal.extend(normalized_chunk)
             normalized_array = np.asarray(normalized_signal, dtype=float)
 
