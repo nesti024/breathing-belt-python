@@ -27,18 +27,12 @@ chunk_size = 10  # Number of samples to read per chunk
 # 2) low-pass for respiration band cleanup
 hp_cutoff_hz = 0.005
 hp_order = 1
-lp_cutoff_hz = 1.0
+lp_cutoff_hz = 1.5
 lp_order = 2
 
 # Artifact/spike processing parameters
-spike_kernel_size = 5
 spike_threshold = 2.5
 artifact_window = 10
-artifact_threshold = 3.5
-processing_context = 40  # Number of previous points to include for stable chunk processing
-# Light smoothing before artifact/peak-style decisions.
-smoothing_window_ms = 400
-
 # One-time robust range calibration settings
 calibration_duration_sec = 15.0
 calibration_percentile_lo = 5.0
@@ -56,8 +50,8 @@ adaptive_startup_center_tau_sec = 25.0
 adaptive_startup_amplitude_tau_sec = 25.0
 
 # Freeze adaptation while signal activity stays very low (breath holds).
-# Activity metric: smoothed |dx/dt| over a 1-second window.
-hold_activity_window_ms = 1000
+# Activity metric: smoothed |dx/dt| over a short rolling window.
+hold_activity_window_ms = 500
 hold_activity_ratio_per_sec_enter = 1.0
 hold_activity_ratio_per_sec_exit = 1.5
 hold_activity_floor_per_sec = 0.01
@@ -115,15 +109,12 @@ def acquire_data():
         from lslOut import LSLBreathingSender
         lsl_sender = LSLBreathingSender(nominal_srate=sampling_rate)
 
-        smoothing_window_samples = int(round((smoothing_window_ms / 1000.0) * sampling_rate))
-        if smoothing_window_samples < 3:
-            smoothing_window_samples = 3
-        if smoothing_window_samples % 2 == 0:
-            smoothing_window_samples += 1
         hold_activity_window_samples = int(round((hold_activity_window_ms / 1000.0) * sampling_rate))
         hold_activity_window_samples = max(3, hold_activity_window_samples)
         recent_abs_velocity = deque(maxlen=hold_activity_window_samples)
+        recent_raw_deltas = deque(maxlen=max(artifact_window, 3))
         previous_cleaned_value = None
+        previous_filtered_value = None
         hold_mode_active = False
 
         # Calibrate on the same processed signal path used at runtime.
@@ -169,41 +160,37 @@ def acquire_data():
         )
         print("Breathe normally and include full inhale/exhale range.")
 
-        def build_cleaned_chunk(chunk_len: int) -> tuple[np.ndarray, np.ndarray]:
-            """Apply smoothing, spike removal, artifact masking and interpolation."""
-            available_context = max(0, len(channel_1_filtered) - chunk_len)
-            context_len = min(processing_context, available_context)
-            # Include short history so chunk boundaries do not create false artifacts.
-            recent_filtered = np.array(
-                list(channel_1_filtered)[-(chunk_len + context_len):],
-                dtype=float,
-            )
-            recent_filtered_smoothed = smooth_signal(
-                recent_filtered,
-                window=smoothing_window_samples,
-            )
-            recent_filtered_processed = remove_spikes(
-                recent_filtered_smoothed,
-                kernel_size=spike_kernel_size,
-                threshold=spike_threshold,
-            )
+        def process_live_sample(filtered_value: float) -> tuple[float, bool]:
+            """Apply reversal-only spike suppression without extra live smoothing."""
+            nonlocal previous_filtered_value
 
-            # Motion artifact detection on the cleaned chunk.
-            # For very short chunks, skip artifact detection to avoid unstable early estimates.
-            if len(recent_filtered_processed) >= artifact_window:
-                artifact_mask = detect_motion_artifacts(
-                    recent_filtered_processed,
-                    window=artifact_window,
-                    threshold=artifact_threshold,
-                )
+            sample_value = float(filtered_value)
+            if previous_filtered_value is None:
+                previous_filtered_value = sample_value
+                recent_raw_deltas.clear()
+                return sample_value, False
+
+            raw_delta = sample_value - previous_filtered_value
+            recent_raw_deltas.append(raw_delta)
+
+            if len(recent_raw_deltas) >= 3:
+                trend_value = float(np.mean(recent_raw_deltas))
+                delta_scale = max(1e-3, float(np.std(recent_raw_deltas)))
             else:
-                artifact_mask = np.zeros_like(recent_filtered_processed, dtype=bool)
+                trend_value = raw_delta
+                delta_scale = max(1e-3, abs(raw_delta))
 
-            # Mark artifacts as NaN and interpolate adaptively.
-            recent_filtered_artifact = recent_filtered_processed.copy()
-            recent_filtered_artifact[artifact_mask] = np.nan
-            recent_filtered_interp = interpolate_artifacts(recent_filtered_artifact)
-            return recent_filtered_interp[-chunk_len:], artifact_mask[-chunk_len:]
+            is_reversal = (
+                abs(raw_delta) > spike_threshold * delta_scale
+                and abs(trend_value) > 0.25 * delta_scale
+                and np.sign(raw_delta) != np.sign(trend_value)
+            )
+
+            previous_filtered_value = sample_value
+            cleaned_value = previous_filtered_value if not is_reversal else (
+                previous_filtered_value - raw_delta
+            )
+            return float(cleaned_value), bool(is_reversal)
 
         while not keyboard.is_pressed('c'):
             # Check for inhale ('i') and exhale ('o') key presses
@@ -259,12 +246,14 @@ def acquire_data():
                 channel_1_filtered.append(filtered_sensor_1_filtered)
                 channel_1_raw.append(raw_sensor_1)
 
-            chunk_len = min(len(data), len(channel_1_filtered))
-            if chunk_len <= 0:
-                continue
+            cleaned_chunk = []
+            artifact_mask_chunk = []
+            for filtered_value in list(channel_1_filtered)[-len(data):]:
+                cleaned_value, is_artifact = process_live_sample(filtered_value)
+                cleaned_chunk.append(cleaned_value)
+                artifact_mask_chunk.append(is_artifact)
 
-            cleaned_chunk, artifact_mask_chunk = build_cleaned_chunk(chunk_len)
-            if cleaned_chunk.size == 0:
+            if not cleaned_chunk:
                 continue
 
             # Startup robust calibration phase.
@@ -316,7 +305,9 @@ def acquire_data():
                 normalized_signal.clear()
                 breath_events.clear()
                 recent_abs_velocity.clear()
+                recent_raw_deltas.clear()
                 previous_cleaned_value = None
+                previous_filtered_value = None
                 hold_mode_active = False
                 sample_count = 0
                 runtime_processed_samples = 0
@@ -365,8 +356,12 @@ def acquire_data():
                 elif activity_value > exit_threshold:
                     hold_mode_active = False
 
-                allow_amplitude_update = (not bool(is_artifact)) and (not hold_mode_active)
-                allow_center_update = allow_amplitude_update and adaptive_center_enabled
+                allow_amplitude_update = False
+                allow_center_update = (
+                    adaptive_center_enabled
+                    and (not bool(is_artifact))
+                    and (not hold_mode_active)
+                )
                 active_cfg = (
                     adaptive_cfg_startup if startup_mode_active else adaptive_cfg_runtime
                 )
@@ -374,7 +369,7 @@ def acquire_data():
                     x=value_float,
                     state=adaptive_state,
                     cfg=active_cfg,
-                    allow_update=allow_amplitude_update or allow_center_update,
+                    allow_update=allow_center_update,
                     allow_center_update=allow_center_update,
                     allow_amplitude_update=allow_amplitude_update,
                 )
@@ -395,7 +390,7 @@ def acquire_data():
                 plot_window = normalized_array[-n_plot:]
                 window_min = float(np.min(plot_window))
                 window_max = float(np.max(plot_window))
-                if debug_plot_window_bounds and (sample_count % sampling_rate) < chunk_len:
+                if debug_plot_window_bounds and (sample_count % sampling_rate) < len(cleaned_chunk):
                     print(
                         f"Plot window range check: min={window_min:.4f}, "
                         f"max={window_max:.4f}, points={n_plot}"

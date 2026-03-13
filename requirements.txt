@@ -1,6 +1,7 @@
-python_version == "3.11.4"
+# Requires Python 3.11.4 (see pyproject.toml)
 
 bitalino
 keyboard
+pylsl
 scipy
 matplotlib
