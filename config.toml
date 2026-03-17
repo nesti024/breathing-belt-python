@@ -1,0 +1,69 @@
+# Update this value before live acquisition.
+[device]
+mac_address = "98:D3:C1:FD:FF:DB"
+sampling_rate_hz = 100
+channels = [0, 1]
+processed_sensor_column = 5
+chunk_size = 10
+queue_max_samples = 1000
+timeout_s = 0.25
+read_error_backoff_s = 0.05
+retries = 3
+retry_delay_s = 2.0
+
+[display]
+enable_plot = true
+plot_window_length = 200
+debug_plot_window_bounds = true
+
+[lsl]
+enable = true
+stream_name = "BreathingBelt"
+stream_type = "Breathing"
+source_id = "breathingbelt001"
+
+[filter]
+hp_cutoff_hz = 0.005
+hp_order = 1
+lp_cutoff_hz = 1.5
+lp_order = 2
+
+[artifact]
+spike_threshold = 2.5
+artifact_window = 10
+
+[calibration]
+duration_s = 15.0
+percentile_lo = 5.0
+percentile_hi = 95.0
+amplitude_floor = 0.001
+
+[adaptation]
+center_enabled = true
+amplitude_enabled = true
+center_tau_s = 600.0
+amplitude_tau_s = 120.0
+startup_duration_s = 60.0
+startup_center_tau_s = 25.0
+startup_amplitude_tau_s = 25.0
+
+[hold]
+activity_window_ms = 500
+ratio_per_sec_enter = 1.0
+ratio_per_sec_exit = 1.5
+floor_per_sec = 0.01
+
+[raw_qc]
+enabled = true
+raw_saturation_lo = 1.0
+raw_saturation_hi = 1022.0
+flatline_epsilon = 0.5
+flatline_duration_s = 2.0
+baseline_ema_tau_s = 30.0
+baseline_abs_dev_tau_s = 10.0
+baseline_shift_sigma = 8.0
+baseline_shift_floor = 50.0
+warmup_s = 5.0
+
+[output]
+root_dir = "runs"

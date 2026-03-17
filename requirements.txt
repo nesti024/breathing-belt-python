@@ -2,6 +2,7 @@
 
 bitalino
 keyboard
+numpy
 pylsl
 scipy
 matplotlib

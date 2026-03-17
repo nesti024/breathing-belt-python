@@ -1,13 +1,28 @@
+[build-system]
+requires = ["setuptools>=68", "wheel"]
+build-backend = "setuptools.build_meta"
+
 [project]
 name = "breathing-belt-python"
 version = "0.1.0"
 description = "Breathing Belt data acquisition and preprocessing"
+readme = "README.md"
 requires-python = "==3.11.4"
 
 dependencies = [
   "bitalino",
   "keyboard",
+  "numpy",
   "pylsl",
   "scipy",
   "matplotlib",
 ]
+
+[project.optional-dependencies]
+dev = ["pytest"]
+
+[project.scripts]
+breathing-belt = "src.main:main"
+
+[tool.setuptools]
+packages = ["src"]
