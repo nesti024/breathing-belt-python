@@ -1,69 +1,90 @@
+"""Signal-processing helpers for respiration-belt data.
+
+The utilities in this module support several stages of the breathing-belt
+pipeline:
+
+- slow extrema tracking for legacy normalization workflows,
+- artifact interpolation and detection,
+- light smoothing,
+- causal IIR filtering for batch and sample-wise operation, and
+- median-based spike replacement.
+
+The current live pipeline primarily uses the stateful high-pass and low-pass
+helpers, but the remaining functions are retained for offline analysis and
+regression tests.
+"""
+
+from __future__ import annotations
+
 import time
-from scipy.signal import butter, lfilter, lfilter_zi, sosfilt, sosfilt_zi
+
 import numpy as np
-from scipy.signal import medfilt
+from scipy.signal import butter, medfilt, sosfilt, sosfilt_zi
 
 
-# ------------------- MaxMinTracker with 1-minute reset -------------------
 class MaxMinTracker:
+    """Track running extrema with a slow activity-gated reset.
+
+    This helper is designed for normalization schemes that adapt to a signal's
+    recent operating range. The reset mechanism is intentionally conservative:
+    the stored extrema decay only when there is measurable signal activity, so
+    quiet periods or breath holds do not collapse the range immediately.
     """
-    Tracks max and min values, resetting every one minute.
-    Call update(value) for each new value. Use get_max_min() to get current max/min.
-    """
+
     def __init__(self, reset_interval_sec=60):
         self.reset_interval = reset_interval_sec
         self.last_reset = time.time()
         self.max_val = None
         self.min_val = None
         self.last_value = None
-        self.activity_threshold = 0.01  # Minimum change to consider as activity
+        self.activity_threshold = 0.01
 
     def update(self, value: float) -> None:
+        """Update extrema with one new sample."""
+
         now = time.time()
-        # Initialize on first call with a small range to avoid division by zero
         if self.max_val is None:
-            self.max_val = value + 0.1  # Add small offset to create initial range
+            # Seed a finite range to avoid zero-width normalization at startup.
+            self.max_val = value + 0.1
             self.min_val = value - 0.1
             self.last_value = value
             return
-        
-        # Check if there's significant signal change (breathing activity)
+
         signal_change = abs(value - self.last_value) if self.last_value is not None else 0
         is_active = signal_change > self.activity_threshold
-        
+
         if (now - self.last_reset) > self.reset_interval and is_active:
-            # Soft reset: only decay when there's active breathing
-            # Move max down toward the center by 10%
+            # The reset is intentionally soft so one update does not erase the
+            # recently observed range.
             self.max_val = max(value, self.max_val - abs(self.max_val) * 0.1)
-            # Move min up toward the center by 10%
             self.min_val = min(value, self.min_val + abs(self.min_val) * 0.1)
             self.last_reset = now
         else:
-            # Always update max/min if new extremes are reached
             if value > self.max_val:
                 self.max_val = value
             if value < self.min_val:
                 self.min_val = value
-        
+
         self.last_value = value
-        
-        # Safety: ensure min < max with at least a small margin
+
         if self.max_val - self.min_val < 0.01:
             center = (self.max_val + self.min_val) / 2
             self.max_val = center + 0.01
             self.min_val = center - 0.01
 
-    def get_max_min(self) -> tuple:
-        return self.max_val, self.min_val
-    
+    def get_max_min(self) -> tuple[float | None, float | None]:
+        """Return the current extrema estimates."""
 
-# ------------------- Normalization function -------------------
+        return self.max_val, self.min_val
+
+
 def normalize_value(value: float, min_val: float, max_val: float) -> float:
+    """Map a scalar linearly into ``[0, 1]``.
+
+    Returns ``0.5`` when the range collapses to a point, and ``np.nan`` when an
+    invalid inverted range is supplied.
     """
-    Normalize a value to the range [0, 1] given min and max.
-    If min_val == max_val, returns 0.5 (centered).
-    If min_val > max_val, returns np.nan.
-    """
+
     if min_val == max_val:
         return 0.5
     if min_val > max_val:
@@ -72,54 +93,66 @@ def normalize_value(value: float, min_val: float, max_val: float) -> float:
 
 
 def interpolate_artifacts(signal: np.ndarray) -> np.ndarray:
+    """Replace ``NaN`` samples by linear interpolation.
+
+    When all samples are missing, the function returns zeros so downstream code
+    can continue with a finite-valued signal.
     """
-    Interpolate over NaN values (artifacts) in the signal using linear interpolation.
-    Handles case where all values are NaN by returning zeros.
-    :param signal: 1D numpy array with NaNs marking artifacts
-    :return: Signal with NaNs replaced by interpolated values
-    """
-    signal = np.asarray(signal).copy()  # Make a copy to avoid modifying input
+
+    signal = np.asarray(signal).copy()
     nans = np.isnan(signal)
     if np.all(nans):
         return np.zeros_like(signal)
     if np.any(nans):
         not_nans = ~nans
-        signal[nans] = np.interp(np.flatnonzero(nans), np.flatnonzero(not_nans), signal[not_nans])
+        signal[nans] = np.interp(
+            np.flatnonzero(nans),
+            np.flatnonzero(not_nans),
+            signal[not_nans],
+        )
     return signal
 
 
+def detect_motion_artifacts(
+    signal: np.ndarray,
+    window: int = 10,
+    threshold: float = 5,
+) -> np.ndarray:
+    """Detect motion artifacts from large local sample-to-sample changes.
 
-def detect_motion_artifacts(signal: np.ndarray, window: int = 10, threshold: float = 5) -> np.ndarray:
+    The decision rule compares the absolute first difference to a local
+    variability estimate. A floor based on the global standard deviation keeps
+    flat plateaus from being incorrectly labeled as artifacts because of a
+    near-zero local variance estimate.
     """
-    Detect motion artifacts by looking for large changes in the signal.
-    Returns a boolean mask where True indicates a motion artifact.
-    Uses a rolling standard deviation for efficiency.
-    :param signal: 1D numpy array of the signal
-    :param window: Number of samples for local std calculation
-    :param threshold: Multiplier for std to detect artifact
-    :return: Boolean numpy array (True = artifact)
-    """
+
     signal = np.asarray(signal, dtype=float)
     if signal.size == 0:
         return np.zeros(0, dtype=bool)
 
     diff = np.abs(np.diff(signal, prepend=signal[0]))
-    # Efficient rolling std using pandas
     try:
         import pandas as pd
-        local_std = pd.Series(signal).rolling(window, min_periods=2).std(ddof=0).to_numpy()
-    except ImportError:
-        # Fallback to slower method if pandas not available
-        if len(signal) < window:
-            # Return array filled with global std for consistency
-            local_std = np.full(len(signal), np.std(signal) if len(signal) > 1 else 1.0)
-        else:
-            local_std = np.array([
-                np.std(signal[max(0, i-window):i+1]) if i > 0 else np.std(signal[:1])
-                for i in range(len(signal))
-            ])
 
-    # Prevent very small local std at plateaus from flagging normal inhale/exhale starts.
+        local_std = (
+            pd.Series(signal).rolling(window, min_periods=2).std(ddof=0).to_numpy()
+        )
+    except ImportError:
+        if len(signal) < window:
+            local_std = np.full(
+                len(signal),
+                np.std(signal) if len(signal) > 1 else 1.0,
+            )
+        else:
+            local_std = np.array(
+                [
+                    np.std(signal[max(0, i - window) : i + 1])
+                    if i > 0
+                    else np.std(signal[:1])
+                    for i in range(len(signal))
+                ]
+            )
+
     global_std = np.std(signal) if len(signal) > 1 else 0.0
     std_floor = max(global_std * 0.25, 1e-4)
     local_std = np.nan_to_num(local_std, nan=global_std)
@@ -130,14 +163,8 @@ def detect_motion_artifacts(signal: np.ndarray, window: int = 10, threshold: flo
 
 
 def smooth_signal(signal: np.ndarray, window: int = 31) -> np.ndarray:
-    """
-    Apply light moving-average smoothing with edge padding.
-    Intended for preprocessing before artifact or peak decisions.
+    """Apply moving-average smoothing with edge padding."""
 
-    :param signal: 1D numpy array of the signal
-    :param window: Smoothing window in samples (odd integer preferred)
-    :return: Smoothed signal with same length as input
-    """
     signal = np.asarray(signal, dtype=float)
     if signal.size < 3:
         return signal.copy()
@@ -154,45 +181,48 @@ def smooth_signal(signal: np.ndarray, window: int = 31) -> np.ndarray:
 
     kernel = np.ones(win, dtype=float) / float(win)
     pad = win // 2
-    padded = np.pad(signal, (pad, pad), mode='edge')
-    return np.convolve(padded, kernel, mode='valid')
+    padded = np.pad(signal, (pad, pad), mode="edge")
+    return np.convolve(padded, kernel, mode="valid")
 
 
-def high_pass_filter(data: np.ndarray, cutoff: float, fs: float, order: int = 5) -> np.ndarray:
+def high_pass_filter(
+    data: np.ndarray,
+    cutoff: float,
+    fs: float,
+    order: int = 5,
+) -> np.ndarray:
+    """Apply a causal Butterworth high-pass filter in batch mode.
+
+    Second-order sections are used for numerical stability at low cutoff
+    frequencies, which are common for respiration-baseline suppression.
     """
-    Apply a high-pass filter to the data (batch mode).
-    Uses second-order sections (SOS) for improved numerical stability.
 
-    :param data: The input data to filter.
-    :param cutoff: The cutoff frequency of the filter in Hz.
-    :param fs: The sampling rate in Hz.
-    :param order: The order of the filter (default: 5).
-    :return: The filtered data.
-    """
     nyquist = 0.5 * fs
     normal_cutoff = cutoff / nyquist
     if normal_cutoff >= 1.0 or normal_cutoff <= 0:
         raise ValueError(f"Cutoff {cutoff} Hz invalid for sampling rate {fs} Hz")
-    sos = butter(order, normal_cutoff, btype='high', analog=False, output='sos')
+    sos = butter(order, normal_cutoff, btype="high", analog=False, output="sos")
     return sosfilt(sos, data)
 
 
-def get_high_pass_filter_coeffs(cutoff: float, fs: float, order: int = 5, initial_value: float = None):
-    """
-    Get high-pass filter coefficients and initial state for real-time filtering.
-    Uses second-order sections (SOS) for improved numerical stability with low cutoff frequencies.
+def get_high_pass_filter_coeffs(
+    cutoff: float,
+    fs: float,
+    order: int = 5,
+    initial_value: float = None,
+):
+    """Create high-pass filter coefficients and initial state for live filtering.
 
-    :param cutoff: The cutoff frequency of the filter in Hz.
-    :param fs: The sampling rate in Hz.
-    :param order: The order of the filter (default: 5).
-    :param initial_value: Optional first sample value to scale zi and avoid transient artifacts.
-    :return: sos, zi (second-order sections and initial state)
+    ``initial_value`` scales the steady-state filter state to reduce startup
+    transients when the first observed sample is already representative of the
+    current baseline.
     """
+
     nyquist = 0.5 * fs
     normal_cutoff = cutoff / nyquist
     if normal_cutoff >= 1.0 or normal_cutoff <= 0:
         raise ValueError(f"Cutoff {cutoff} Hz invalid for sampling rate {fs} Hz")
-    sos = butter(order, normal_cutoff, btype='high', analog=False, output='sos')
+    sos = butter(order, normal_cutoff, btype="high", analog=False, output="sos")
     zi = sosfilt_zi(sos)
     if initial_value is not None:
         zi = zi * initial_value
@@ -200,55 +230,41 @@ def get_high_pass_filter_coeffs(cutoff: float, fs: float, order: int = 5, initia
 
 
 def high_pass_filter_sample(sample: float, sos, zi):
-    """
-    Filter a single sample with stateful processing.
-    Uses second-order sections (SOS) for improved numerical stability.
+    """Filter one sample with a stateful high-pass filter."""
 
-    :param sample: The new sample to filter.
-    :param sos: Second-order sections filter representation.
-    :param zi: Filter state.
-    :return: filtered_sample, updated_zi
-    """
     filtered, zi = sosfilt(sos, [sample], zi=zi)
     return filtered[0], zi
 
 
-# ------------------- Low-pass filter functions -------------------
-def low_pass_filter(data: np.ndarray, cutoff: float, fs: float, order: int = 2) -> np.ndarray:
-    """
-    Apply a low-pass filter to the data (batch mode).
-    Uses second-order sections (SOS) for improved numerical stability.
+def low_pass_filter(
+    data: np.ndarray,
+    cutoff: float,
+    fs: float,
+    order: int = 2,
+) -> np.ndarray:
+    """Apply a causal Butterworth low-pass filter in batch mode."""
 
-    :param data: The input data to filter.
-    :param cutoff: The cutoff frequency of the filter in Hz.
-    :param fs: The sampling rate in Hz.
-    :param order: The order of the filter (default: 2).
-    :return: The filtered data.
-    """
     nyquist = 0.5 * fs
     normal_cutoff = cutoff / nyquist
     if normal_cutoff >= 1.0 or normal_cutoff <= 0:
         raise ValueError(f"Cutoff {cutoff} Hz invalid for sampling rate {fs} Hz")
-    sos = butter(order, normal_cutoff, btype='low', analog=False, output='sos')
+    sos = butter(order, normal_cutoff, btype="low", analog=False, output="sos")
     return sosfilt(sos, data)
 
 
-def get_low_pass_filter_coeffs(cutoff: float, fs: float, order: int = 2, initial_value: float = None):
-    """
-    Get low-pass filter coefficients and initial state for real-time filtering.
-    Uses second-order sections (SOS) for improved numerical stability.
+def get_low_pass_filter_coeffs(
+    cutoff: float,
+    fs: float,
+    order: int = 2,
+    initial_value: float = None,
+):
+    """Create low-pass filter coefficients and initial state for live filtering."""
 
-    :param cutoff: The cutoff frequency of the filter in Hz.
-    :param fs: The sampling rate in Hz.
-    :param order: The order of the filter (default: 2).
-    :param initial_value: Optional first sample value to scale zi and avoid transient artifacts.
-    :return: sos, zi (second-order sections and initial state)
-    """
     nyquist = 0.5 * fs
     normal_cutoff = cutoff / nyquist
     if normal_cutoff >= 1.0 or normal_cutoff <= 0:
         raise ValueError(f"Cutoff {cutoff} Hz invalid for sampling rate {fs} Hz")
-    sos = butter(order, normal_cutoff, btype='low', analog=False, output='sos')
+    sos = butter(order, normal_cutoff, btype="low", analog=False, output="sos")
     zi = sosfilt_zi(sos)
     if initial_value is not None:
         zi = zi * initial_value
@@ -256,59 +272,49 @@ def get_low_pass_filter_coeffs(cutoff: float, fs: float, order: int = 2, initial
 
 
 def low_pass_filter_sample(sample: float, sos, zi):
-    """
-    Filter a single sample with stateful processing (low-pass).
-    Uses second-order sections (SOS) for improved numerical stability.
+    """Filter one sample with a stateful low-pass filter."""
 
-    :param sample: The new sample to filter.
-    :param sos: Second-order sections filter representation.
-    :param zi: Filter state.
-    :return: filtered_sample, updated_zi
-    """
     filtered, zi = sosfilt(sos, [sample], zi=zi)
     return filtered[0], zi
 
 
-# ------------------- Band-pass filter functions -------------------
-def band_pass_filter(data: np.ndarray, lowcut: float, highcut: float, fs: float, order: int = 4) -> np.ndarray:
-    """
-    Apply a band-pass filter to the data (batch mode).
-    Uses second-order sections (SOS) for improved numerical stability.
+def band_pass_filter(
+    data: np.ndarray,
+    lowcut: float,
+    highcut: float,
+    fs: float,
+    order: int = 4,
+) -> np.ndarray:
+    """Apply a causal Butterworth band-pass filter in batch mode."""
 
-    :param data: The input data to filter.
-    :param lowcut: The lower cutoff frequency in Hz.
-    :param highcut: The upper cutoff frequency in Hz.
-    :param fs: The sampling rate in Hz.
-    :param order: The order of the filter (default: 4).
-    :return: The filtered data.
-    """
     nyquist = 0.5 * fs
     low = lowcut / nyquist
     high = highcut / nyquist
     if low <= 0 or low >= 1.0 or high <= 0 or high >= 1.0 or low >= high:
-        raise ValueError(f"Invalid band-pass cutoffs: {lowcut}-{highcut} Hz for sampling rate {fs} Hz")
-    sos = butter(order, [low, high], btype='band', output='sos')
+        raise ValueError(
+            f"Invalid band-pass cutoffs: {lowcut}-{highcut} Hz for sampling rate {fs} Hz"
+        )
+    sos = butter(order, [low, high], btype="band", output="sos")
     return sosfilt(sos, data)
 
 
-def get_band_pass_filter_coeffs(lowcut: float, highcut: float, fs: float, order: int = 4, initial_value: float = None):
-    """
-    Get band-pass filter coefficients and initial state for real-time filtering.
-    Uses second-order sections (SOS) for improved numerical stability.
+def get_band_pass_filter_coeffs(
+    lowcut: float,
+    highcut: float,
+    fs: float,
+    order: int = 4,
+    initial_value: float = None,
+):
+    """Create band-pass filter coefficients and initial state for live filtering."""
 
-    :param lowcut: The lower cutoff frequency in Hz.
-    :param highcut: The upper cutoff frequency in Hz.
-    :param fs: The sampling rate in Hz.
-    :param order: The order of the filter (default: 4).
-    :param initial_value: Optional first sample value to scale zi and avoid transient artifacts.
-    :return: sos, zi (second-order sections and initial state)
-    """
     nyquist = 0.5 * fs
     low = lowcut / nyquist
     high = highcut / nyquist
     if low <= 0 or low >= 1.0 or high <= 0 or high >= 1.0 or low >= high:
-        raise ValueError(f"Invalid band-pass cutoffs: {lowcut}-{highcut} Hz for sampling rate {fs} Hz")
-    sos = butter(order, [low, high], btype='band', output='sos')
+        raise ValueError(
+            f"Invalid band-pass cutoffs: {lowcut}-{highcut} Hz for sampling rate {fs} Hz"
+        )
+    sos = butter(order, [low, high], btype="band", output="sos")
     zi = sosfilt_zi(sos)
     if initial_value is not None:
         zi = zi * initial_value
@@ -316,34 +322,22 @@ def get_band_pass_filter_coeffs(lowcut: float, highcut: float, fs: float, order:
 
 
 def band_pass_filter_sample(sample: float, sos, zi):
-    """
-    Filter a single sample with stateful processing (band-pass).
-    Uses second-order sections (SOS) for improved numerical stability.
+    """Filter one sample with a stateful band-pass filter."""
 
-    :param sample: The new sample to filter.
-    :param sos: Second-order sections filter representation.
-    :param zi: Filter state.
-    :return: filtered_sample, updated_zi
-    """
     filtered, zi = sosfilt(sos, [sample], zi=zi)
     return filtered[0], zi
 
 
-# ------------------- Spike removal function -------------------
+def remove_spikes(
+    signal: np.ndarray,
+    kernel_size: int = 5,
+    threshold: float = 3,
+) -> np.ndarray:
+    """Replace large isolated deviations with a local median estimate."""
 
-
-def remove_spikes(signal: np.ndarray, kernel_size: int = 5, threshold: float = 3) -> np.ndarray:
-    """
-    Remove spikes using a median filter and thresholding.
-    Checks signal length to avoid unwanted padding.
-    :param signal: 1D numpy array of the signal
-    :param kernel_size: Size of the median filter window (odd integer)
-    :param threshold: Multiplier for standard deviation to detect spikes
-    :return: Signal with spikes replaced by median-filtered values
-    """
     if len(signal) < kernel_size:
-        # Return original signal if too short for median filter
         return signal
+
     filtered = medfilt(signal, kernel_size)
     diff = np.abs(signal - filtered)
     spikes = diff > threshold * np.std(signal)

@@ -1,60 +1,96 @@
-import bitalino
-import time
-import threading
+"""Device-connection and asynchronous sample-acquisition utilities.
+
+This module wraps the BITalino interface used by the breathing-belt
+application. The public API separates one-shot device actions from the
+``BreathBelt`` reader, which maintains a background acquisition thread and a
+bounded in-memory sample buffer for non-blocking access from the main loop.
+"""
+
+from __future__ import annotations
+
 from collections import deque
+import threading
+import time
+
+import bitalino
 import numpy as np
 
+
 def connect_device(mac_address, retries=3, retry_delay=2.0, timeout=None):
+    """Connect to a BITalino device with bounded retry behavior.
+
+    Parameters
+    ----------
+    mac_address:
+        Bluetooth MAC address of the target BITalino device.
+    retries:
+        Maximum number of connection attempts before raising an exception.
+    retry_delay:
+        Delay in seconds between failed connection attempts.
+    timeout:
+        Optional device timeout forwarded to the BITalino constructor.
     """
-    Connect to a BITalino device with retry logic.
-    """
+
     for attempt in range(retries):
         try:
             device = bitalino.BITalino(mac_address, timeout=timeout)
             print(f"Connected to {mac_address} on attempt {attempt + 1}")
             return device
-        except Exception as e:
-            print(f"Connection attempt {attempt + 1} failed: {e}")
+        except Exception as error:
+            print(f"Connection attempt {attempt + 1} failed: {error}")
             if attempt < retries - 1:
                 time.sleep(retry_delay)
             else:
-                raise ConnectionError(f"Failed to connect after {retries} attempts") from e
+                raise ConnectionError(
+                    f"Failed to connect after {retries} attempts"
+                ) from error
+
 
 def start_acquisition(device, sampling_rate, channels):
-    """
-    Start data acquisition on the given channels.
-    """
+    """Start BITalino acquisition on the requested channels."""
+
     device.start(sampling_rate, channels)
 
+
 def read_samples(device, sample_count):
+    """Read one batch of samples from the BITalino device.
+
+    Returns
+    -------
+    numpy.ndarray or None
+        Array of shape ``(sample_count, n_columns)`` when data are available,
+        otherwise ``None`` after an empty or failed read.
     """
-    Read a batch of samples from the device.
-    Returns numpy array of shape (sample_count, n_columns) or None on failure.
-    """
+
     try:
         data = device.read(sample_count)
         if data is None or len(data) == 0:
             return None
         return data
-    except Exception as e:
-        print(f"Read error: {e}")
+    except Exception as error:
+        print(f"Read error: {error}")
         return None
 
+
 def stop_acquisition(device):
-    """
-    Stop data acquisition.
-    """
+    """Stop an active BITalino acquisition session."""
+
     device.stop()
 
+
 def close_device(device):
-    """
-    Close the device connection.
-    """
+    """Close the underlying BITalino connection."""
+
     device.close()
 
 
 class BreathBelt:
-    """Threaded non-blocking BITalino reader with a bounded sample buffer."""
+    """Asynchronous BITalino reader with a bounded sample queue.
+
+    The reader continuously acquires data in a daemon thread and stores the
+    newest samples in a deque. This design lets the main application consume
+    all currently buffered samples without blocking on device I/O.
+    """
 
     def __init__(
         self,
@@ -98,14 +134,18 @@ class BreathBelt:
         self._started = False
 
     def _reader_loop(self):
+        """Continuously acquire chunks and append them to the bounded queue."""
+
         while not self._stop_event.is_set():
             device = self._device
             if device is None:
                 break
+
             try:
                 data = device.read(self.read_chunk_size)
                 if data is None or len(data) == 0:
                     continue
+
                 data_array = np.asarray(data)
                 if data_array.ndim == 1:
                     data_array = data_array.reshape(1, -1)
@@ -126,6 +166,8 @@ class BreathBelt:
                     time.sleep(self.read_error_backoff_s)
 
     def start(self):
+        """Connect to the device, start acquisition, and launch the reader thread."""
+
         if self._started:
             return
 
@@ -161,6 +203,8 @@ class BreathBelt:
         self._thread.start()
 
     def stop(self):
+        """Stop the reader thread and close the device safely."""
+
         if not self._started:
             return
 
@@ -168,6 +212,8 @@ class BreathBelt:
 
         thread = self._thread
         if thread is not None and thread.is_alive():
+            # The join timeout is tied to the device timeout so shutdown remains
+            # responsive even when a read is in progress.
             join_timeout = max(0.5, self.timeout_s * 2.0)
             thread.join(timeout=join_timeout)
 
@@ -191,12 +237,20 @@ class BreathBelt:
                 self._last_error = error
 
     def get_latest(self):
+        """Return the most recent sample or ``None`` if no data are available."""
+
         with self._lock:
             if self._latest is None:
                 return None
             return self._latest.copy()
 
     def get_all(self):
+        """Return and clear all currently buffered samples.
+
+        Returns an empty array when the queue is empty so callers can keep a
+        stable array-based interface.
+        """
+
         with self._lock:
             if len(self._queue) == 0:
                 return np.empty((0, self._sample_width), dtype=float)
@@ -206,10 +260,14 @@ class BreathBelt:
 
     @property
     def last_error(self):
+        """Most recent asynchronous read or shutdown error, if any."""
+
         with self._lock:
             return self._last_error
 
     @property
     def is_running(self):
+        """Whether the background acquisition thread is alive."""
+
         thread = self._thread
         return bool(self._started and thread is not None and thread.is_alive())
