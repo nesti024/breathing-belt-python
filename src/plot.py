@@ -1,17 +1,25 @@
 """Plotting utilities for live and offline respiration-belt visualization."""
 
+from __future__ import annotations
+
+from typing import Sequence
+
 import matplotlib.pyplot as plt
 import numpy as np
+from matplotlib.axes import Axes
+from matplotlib.backend_bases import FigureCanvasBase
+from matplotlib.lines import Line2D
+from matplotlib.figure import Figure
 
 
 def plot_breathing_channel(
-    channel_data,
-    time=None,
-    live=False,
-    ax=None,
-    line=None,
-    blit_manager=None,
-):
+    channel_data: Sequence[float] | np.ndarray,
+    time: Sequence[float] | np.ndarray | None = None,
+    live: bool = False,
+    ax: Axes | None = None,
+    line: Line2D | None = None,
+    blit_manager: "BlitManager | None" = None,
+) -> None:
     """Plot a respiration trace or update an existing live plot.
 
     Parameters
@@ -65,7 +73,9 @@ def plot_breathing_channel(
     plt.show()
 
 
-def setup_live_plot(title="Breathing Belt Channel Visualization"):
+def setup_live_plot(
+    title: str = "Breathing Belt Channel Visualization",
+) -> tuple[Figure, Axes, Line2D, None]:
     """Create and show an interactive plot for the normalized respiration trace."""
     plt.ion()
     fig, ax = plt.subplots(figsize=(10, 4))
@@ -87,7 +97,11 @@ def setup_live_plot(title="Breathing Belt Channel Visualization"):
 class BlitManager:
     """Minimal blitting helper retained for non-scrolling plot use cases."""
 
-    def __init__(self, canvas, animated_artists):
+    def __init__(
+        self,
+        canvas: FigureCanvasBase,
+        animated_artists: Sequence,
+    ) -> None:
         self.canvas = canvas
         self.animated_artists = animated_artists
         for artist in self.animated_artists:
@@ -96,14 +110,14 @@ class BlitManager:
         self._cid = self.canvas.mpl_connect("draw_event", self.on_draw)
         self.on_draw(None)
 
-    def on_draw(self, event):
+    def on_draw(self, event) -> None:
         del event
         self.background = self.canvas.figure.canvas.copy_from_bbox(self.canvas.figure.bbox)
         for artist in self.animated_artists:
             self.canvas.figure.draw_artist(artist)
         self.canvas.flush_events()
 
-    def update(self):
+    def update(self) -> None:
         if self.background is None:
             return
 

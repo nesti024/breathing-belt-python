@@ -1,9 +1,15 @@
+"""Regression tests for robust percentile-based calibration."""
+
+from __future__ import annotations
+
 import numpy as np
 
 from src.calibration import CalibrationConfig, normalize_sample, run_range_calibration
 
 
 def test_percentile_clipping_rejects_outliers() -> None:
+    """Extreme outliers should not dominate the calibrated operating range."""
+
     rng = np.random.default_rng(123)
     main = rng.normal(loc=100.0, scale=2.0, size=1000)
     samples = np.concatenate([main, np.array([-1000.0, 2500.0, -900.0, 2600.0])])
@@ -24,6 +30,8 @@ def test_percentile_clipping_rejects_outliers() -> None:
 
 
 def test_saturation_detection_counts_rail_hits() -> None:
+    """Samples at or beyond the configured rails should be counted as saturated."""
+
     samples = np.array([0.0, 1.0, 10.0, 500.0, 1022.0, 1023.0], dtype=float)
     cfg = CalibrationConfig(
         fs_hz=100.0,
@@ -37,6 +45,8 @@ def test_saturation_detection_counts_rail_hits() -> None:
 
 
 def test_index_clamping_tiny_sample_counts() -> None:
+    """Percentile index logic should remain valid for very short inputs."""
+
     one = np.array([42.0], dtype=float)
     cfg_one = CalibrationConfig(fs_hz=100.0, percentile_lo=5.0, percentile_hi=95.0)
     r_one = run_range_calibration(one, cfg_one)
@@ -57,6 +67,8 @@ def test_index_clamping_tiny_sample_counts() -> None:
 
 
 def test_amplitude_floor_for_constant_signal() -> None:
+    """A constant calibration trace should fall back to the amplitude floor."""
+
     samples = np.full(128, 7.5, dtype=float)
     cfg = CalibrationConfig(fs_hz=100.0, amplitude_floor=0.25)
     result = run_range_calibration(samples, cfg)
@@ -69,18 +81,21 @@ def test_amplitude_floor_for_constant_signal() -> None:
 
 
 def test_normalize_sample_clamps_outside_calibrated_range() -> None:
+    """Samples beyond the calibrated range should clamp to the control rails."""
+
     assert normalize_sample(-10.0, center=0.0, amplitude=1.0, clamp=True) == 0.0
     assert normalize_sample(10.0, center=0.0, amplitude=1.0, clamp=True) == 1.0
 
 
 def test_fixed_calibration_stream_normalization_is_bounded() -> None:
+    """Runtime samples must remain bounded even when they exceed calibration amplitude."""
+
     fs_hz = 100.0
     t = np.arange(0.0, 12.0, 1.0 / fs_hz)
     calibration_samples = np.sin(2.0 * np.pi * 0.22 * t)
     cfg = CalibrationConfig(fs_hz=fs_hz, percentile_lo=5.0, percentile_hi=95.0)
     result = run_range_calibration(calibration_samples, cfg)
 
-    # Simulate runtime breaths with larger amplitude than during calibration.
     runtime_samples = 1.8 * np.sin(2.0 * np.pi * 0.22 * t)
     normalized = np.array(
         [

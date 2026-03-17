@@ -1,3 +1,7 @@
+"""Regression tests for adaptive normalization during live operation."""
+
+from __future__ import annotations
+
 import numpy as np
 
 from src.calibration import (
@@ -14,6 +18,8 @@ def _make_calibrated_state(
     fs_hz: float = 100.0,
     duration_s: float = 15.0,
 ) -> tuple[np.ndarray, AdaptiveRangeConfig, AdaptiveRangeState]:
+    """Construct a calibrated adaptive state from a synthetic breathing trace."""
+
     t = np.arange(0.0, duration_s, 1.0 / fs_hz)
     calibration_samples = 0.8 * np.sin(2.0 * np.pi * 0.22 * t)
     cal_cfg = CalibrationConfig(
@@ -41,6 +47,8 @@ def _stream_normalize(
     state: AdaptiveRangeState,
     allow_updates: np.ndarray | None = None,
 ) -> tuple[np.ndarray, AdaptiveRangeState]:
+    """Normalize a stream sample-by-sample using the runtime update function."""
+
     normalized = np.zeros(stream.size, dtype=float)
     if allow_updates is None:
         allow_updates = np.ones(stream.size, dtype=bool)
@@ -57,6 +65,8 @@ def _stream_normalize(
 
 
 def test_initialize_adaptive_range_seeds_from_calibration() -> None:
+    """Adaptive initialization should inherit the calibration operating point."""
+
     calibration_samples, adapt_cfg, state = _make_calibrated_state()
     cal_result = run_range_calibration(
         calibration_samples,
@@ -77,6 +87,8 @@ def test_initialize_adaptive_range_seeds_from_calibration() -> None:
 
 
 def test_artifact_gating_prevents_state_updates() -> None:
+    """Disabled updates must freeze both center and amplitude estimates."""
+
     _, adapt_cfg, state = _make_calibrated_state()
     start_center = state.center
     start_amplitude = state.amplitude
@@ -94,6 +106,8 @@ def test_artifact_gating_prevents_state_updates() -> None:
 
 
 def test_slow_drift_keeps_control_centered_without_rail_pinning() -> None:
+    """Slow baseline drift should not push the normalized output onto the rails."""
+
     _, adapt_cfg, state = _make_calibrated_state()
     fs_hz = adapt_cfg.fs_hz
     duration_s = 6.0 * 60.0
@@ -114,6 +128,8 @@ def test_slow_drift_keeps_control_centered_without_rail_pinning() -> None:
 
 
 def test_spike_transients_with_gating_do_not_destabilize_state() -> None:
+    """Masked spikes should not materially bias the adaptive normalization state."""
+
     _, adapt_cfg, initial_state = _make_calibrated_state()
     fs_hz = adapt_cfg.fs_hz
     duration_s = 120.0
@@ -145,6 +161,8 @@ def test_spike_transients_with_gating_do_not_destabilize_state() -> None:
 
 
 def test_adaptive_normalization_output_is_bounded() -> None:
+    """Normalized output must remain inside the control interval [0, 1]."""
+
     _, adapt_cfg, state = _make_calibrated_state()
     fs_hz = adapt_cfg.fs_hz
     duration_s = 240.0
@@ -161,6 +179,8 @@ def test_adaptive_normalization_output_is_bounded() -> None:
 
 
 def test_update_allows_disabling_center_updates_only() -> None:
+    """Amplitude adaptation should work when center adaptation is disabled."""
+
     _, adapt_cfg, state = _make_calibrated_state()
     start_center = state.center
     start_amplitude = state.amplitude
@@ -178,6 +198,8 @@ def test_update_allows_disabling_center_updates_only() -> None:
 
 
 def test_update_allows_disabling_amplitude_updates_only() -> None:
+    """Center adaptation should work when amplitude adaptation is disabled."""
+
     _, adapt_cfg, state = _make_calibrated_state()
     start_center = state.center
     start_amplitude = state.amplitude

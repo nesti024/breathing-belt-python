@@ -21,7 +21,7 @@ from calibration import (
     update_adaptive_range,
 )
 from connect import BreathBelt
-from lslOut import LSLBreathingSender
+from lsl_out import LSLBreathingSender
 from plot import plot_breathing_channel, setup_live_plot
 from preprocessing import (
     get_high_pass_filter_coeffs,

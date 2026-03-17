@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from collections.abc import Iterable
+
 from pylsl import StreamInfo, StreamOutlet
 
 
@@ -14,12 +16,12 @@ class LSLBreathingSender:
 
     def __init__(
         self,
-        name="BreathingBelt",
-        type="Breathing",
-        channel_count=1,
-        nominal_srate=0,
-        source_id="breathingbelt001",
-    ):
+        name: str = "BreathingBelt",
+        type: str = "Breathing",
+        channel_count: int = 1,
+        nominal_srate: float = 0,
+        source_id: str = "breathingbelt001",
+    ) -> None:
         """Create the LSL outlet and its associated stream metadata."""
 
         self.info = StreamInfo(
@@ -32,7 +34,7 @@ class LSLBreathingSender:
         )
         self.outlet = StreamOutlet(self.info)
 
-    def send(self, data):
+    def send(self, data: float | int | Iterable[float | int]) -> None:
         """Send one sample to the LSL outlet.
 
         Parameters

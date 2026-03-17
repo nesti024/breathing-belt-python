@@ -31,7 +31,7 @@ class MaxMinTracker:
     quiet periods or breath holds do not collapse the range immediately.
     """
 
-    def __init__(self, reset_interval_sec=60):
+    def __init__(self, reset_interval_sec: float = 60) -> None:
         self.reset_interval = reset_interval_sec
         self.last_reset = time.time()
         self.max_val = None
@@ -210,7 +210,7 @@ def get_high_pass_filter_coeffs(
     fs: float,
     order: int = 5,
     initial_value: float = None,
-):
+) -> tuple[np.ndarray, np.ndarray]:
     """Create high-pass filter coefficients and initial state for live filtering.
 
     ``initial_value`` scales the steady-state filter state to reduce startup
@@ -229,7 +229,11 @@ def get_high_pass_filter_coeffs(
     return sos, zi
 
 
-def high_pass_filter_sample(sample: float, sos, zi):
+def high_pass_filter_sample(
+    sample: float,
+    sos: np.ndarray,
+    zi: np.ndarray,
+) -> tuple[float, np.ndarray]:
     """Filter one sample with a stateful high-pass filter."""
 
     filtered, zi = sosfilt(sos, [sample], zi=zi)
@@ -257,7 +261,7 @@ def get_low_pass_filter_coeffs(
     fs: float,
     order: int = 2,
     initial_value: float = None,
-):
+) -> tuple[np.ndarray, np.ndarray]:
     """Create low-pass filter coefficients and initial state for live filtering."""
 
     nyquist = 0.5 * fs
@@ -271,7 +275,11 @@ def get_low_pass_filter_coeffs(
     return sos, zi
 
 
-def low_pass_filter_sample(sample: float, sos, zi):
+def low_pass_filter_sample(
+    sample: float,
+    sos: np.ndarray,
+    zi: np.ndarray,
+) -> tuple[float, np.ndarray]:
     """Filter one sample with a stateful low-pass filter."""
 
     filtered, zi = sosfilt(sos, [sample], zi=zi)
@@ -304,7 +312,7 @@ def get_band_pass_filter_coeffs(
     fs: float,
     order: int = 4,
     initial_value: float = None,
-):
+) -> tuple[np.ndarray, np.ndarray]:
     """Create band-pass filter coefficients and initial state for live filtering."""
 
     nyquist = 0.5 * fs
@@ -321,7 +329,11 @@ def get_band_pass_filter_coeffs(
     return sos, zi
 
 
-def band_pass_filter_sample(sample: float, sos, zi):
+def band_pass_filter_sample(
+    sample: float,
+    sos: np.ndarray,
+    zi: np.ndarray,
+) -> tuple[float, np.ndarray]:
     """Filter one sample with a stateful band-pass filter."""
 
     filtered, zi = sosfilt(sos, [sample], zi=zi)

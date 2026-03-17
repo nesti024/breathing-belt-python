@@ -11,12 +11,18 @@ from __future__ import annotations
 from collections import deque
 import threading
 import time
+from typing import Any
 
 import bitalino
 import numpy as np
 
 
-def connect_device(mac_address, retries=3, retry_delay=2.0, timeout=None):
+def connect_device(
+    mac_address: str,
+    retries: int = 3,
+    retry_delay: float = 2.0,
+    timeout: float | None = None,
+) -> Any:
     """Connect to a BITalino device with bounded retry behavior.
 
     Parameters
@@ -46,13 +52,17 @@ def connect_device(mac_address, retries=3, retry_delay=2.0, timeout=None):
                 ) from error
 
 
-def start_acquisition(device, sampling_rate, channels):
+def start_acquisition(
+    device: Any,
+    sampling_rate: int,
+    channels: list[int] | tuple[int, ...],
+) -> None:
     """Start BITalino acquisition on the requested channels."""
 
     device.start(sampling_rate, channels)
 
 
-def read_samples(device, sample_count):
+def read_samples(device: Any, sample_count: int) -> np.ndarray | None:
     """Read one batch of samples from the BITalino device.
 
     Returns
@@ -72,13 +82,13 @@ def read_samples(device, sample_count):
         return None
 
 
-def stop_acquisition(device):
+def stop_acquisition(device: Any) -> None:
     """Stop an active BITalino acquisition session."""
 
     device.stop()
 
 
-def close_device(device):
+def close_device(device: Any) -> None:
     """Close the underlying BITalino connection."""
 
     device.close()
@@ -94,16 +104,16 @@ class BreathBelt:
 
     def __init__(
         self,
-        mac_address,
-        sampling_rate,
-        channels=(0, 1),
-        read_chunk_size=10,
-        queue_max_samples=1000,
-        timeout_s=0.25,
-        read_error_backoff_s=0.05,
-        retries=3,
-        retry_delay_s=2.0,
-    ):
+        mac_address: str,
+        sampling_rate: int,
+        channels: tuple[int, ...] = (0, 1),
+        read_chunk_size: int = 10,
+        queue_max_samples: int = 1000,
+        timeout_s: float = 0.25,
+        read_error_backoff_s: float = 0.05,
+        retries: int = 3,
+        retry_delay_s: float = 2.0,
+    ) -> None:
         if read_chunk_size <= 0:
             raise ValueError("read_chunk_size must be positive.")
         if queue_max_samples <= 0:
@@ -123,17 +133,17 @@ class BreathBelt:
         self.retries = int(retries)
         self.retry_delay_s = float(retry_delay_s)
 
-        self._device = None
-        self._thread = None
+        self._device: Any | None = None
+        self._thread: threading.Thread | None = None
         self._stop_event = threading.Event()
         self._lock = threading.Lock()
-        self._queue = deque(maxlen=self.queue_max_samples)
-        self._latest = None
+        self._queue: deque[np.ndarray] = deque(maxlen=self.queue_max_samples)
+        self._latest: np.ndarray | None = None
         self._sample_width = 0
-        self._last_error = None
+        self._last_error: Exception | None = None
         self._started = False
 
-    def _reader_loop(self):
+    def _reader_loop(self) -> None:
         """Continuously acquire chunks and append them to the bounded queue."""
 
         while not self._stop_event.is_set():
@@ -165,7 +175,7 @@ class BreathBelt:
                 if self.read_error_backoff_s > 0.0:
                     time.sleep(self.read_error_backoff_s)
 
-    def start(self):
+    def start(self) -> None:
         """Connect to the device, start acquisition, and launch the reader thread."""
 
         if self._started:
@@ -202,7 +212,7 @@ class BreathBelt:
         self._started = True
         self._thread.start()
 
-    def stop(self):
+    def stop(self) -> None:
         """Stop the reader thread and close the device safely."""
 
         if not self._started:
@@ -236,7 +246,7 @@ class BreathBelt:
             with self._lock:
                 self._last_error = error
 
-    def get_latest(self):
+    def get_latest(self) -> np.ndarray | None:
         """Return the most recent sample or ``None`` if no data are available."""
 
         with self._lock:
@@ -244,7 +254,7 @@ class BreathBelt:
                 return None
             return self._latest.copy()
 
-    def get_all(self):
+    def get_all(self) -> np.ndarray:
         """Return and clear all currently buffered samples.
 
         Returns an empty array when the queue is empty so callers can keep a
@@ -259,14 +269,14 @@ class BreathBelt:
         return np.vstack(rows)
 
     @property
-    def last_error(self):
+    def last_error(self) -> Exception | None:
         """Most recent asynchronous read or shutdown error, if any."""
 
         with self._lock:
             return self._last_error
 
     @property
-    def is_running(self):
+    def is_running(self) -> bool:
         """Whether the background acquisition thread is alive."""
 
         thread = self._thread
