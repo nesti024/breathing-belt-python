@@ -100,14 +100,14 @@ def setup_live_plot(
 def setup_live_plots(
     *,
     raw_title: str = "Raw Sensor Signal",
-    normalized_title: str = "Normalized Breathing Signal (0-1 range)",
+    normalized_title: str = "Breath Level (0-1)",
 ) -> tuple[Figure, Axes, Line2D, Axes, Line2D, None]:
     """Create and show a two-panel live dashboard for raw and normalized traces."""
 
     plt.ion()
     fig, (raw_ax, normalized_ax) = plt.subplots(1, 2, figsize=(14, 4))
     raw_line, = raw_ax.plot([], [], label="Raw Sensor Signal")
-    normalized_line, = normalized_ax.plot([], [], label="Breathing Signal")
+    normalized_line, = normalized_ax.plot([], [], label="Breath Level")
 
     raw_ax.set_xlabel("Sample")
     raw_ax.set_ylabel("Raw Amplitude")
@@ -141,6 +141,10 @@ def update_live_plots(
     raw_line: Line2D,
     normalized_ax: Axes,
     normalized_line: Line2D,
+    peak_times: Sequence[float] | np.ndarray | None = None,
+    peak_values: Sequence[float] | np.ndarray | None = None,
+    trough_times: Sequence[float] | np.ndarray | None = None,
+    trough_values: Sequence[float] | np.ndarray | None = None,
     blit_manager: "BlitManager | None" = None,
 ) -> None:
     """Update the live raw and normalized plots in one redraw pass."""
@@ -163,6 +167,13 @@ def update_live_plots(
         line=normalized_line,
         clip_range=(0.0, 1.0),
         fixed_ylim=(0.0, 1.0),
+    )
+    _update_raw_event_markers(
+        raw_ax,
+        peak_times=peak_times,
+        peak_values=peak_values,
+        trough_times=trough_times,
+        trough_values=trough_values,
     )
     _refresh_live_canvas()
 
@@ -248,6 +259,46 @@ def _refresh_live_canvas() -> None:
             category=UserWarning,
         )
         plt.pause(0.001)
+
+
+def _update_raw_event_markers(
+    ax: Axes,
+    *,
+    peak_times: Sequence[float] | np.ndarray | None,
+    peak_values: Sequence[float] | np.ndarray | None,
+    trough_times: Sequence[float] | np.ndarray | None,
+    trough_values: Sequence[float] | np.ndarray | None,
+) -> None:
+    while ax.collections:
+        ax.collections[0].remove()
+
+    if peak_times is not None and peak_values is not None:
+        peak_x = np.asarray(peak_times, dtype=float)
+        peak_y = np.asarray(peak_values, dtype=float)
+        if peak_x.size > 0 and peak_y.size > 0:
+            ax.scatter(
+                peak_x,
+                peak_y,
+                marker="^",
+                color="tab:red",
+                s=36,
+                zorder=3,
+                label="_nolegend_",
+            )
+
+    if trough_times is not None and trough_values is not None:
+        trough_x = np.asarray(trough_times, dtype=float)
+        trough_y = np.asarray(trough_values, dtype=float)
+        if trough_x.size > 0 and trough_y.size > 0:
+            ax.scatter(
+                trough_x,
+                trough_y,
+                marker="v",
+                color="tab:blue",
+                s=36,
+                zorder=3,
+                label="_nolegend_",
+            )
 
 
 def _show_live_figure() -> None:

@@ -8,21 +8,26 @@ from pylsl import StreamInfo, StreamOutlet
 
 
 class LSLBreathingSender:
-    """Publish normalized breathing samples as a single-channel LSL stream.
+    """Publish breathing control data as a multi-channel LSL stream.
 
-    The stream is configured as ``float32`` because the normalized breathing
-    control signal is scalar and continuous in the range ``[0, 1]``.
+    The stream is configured as ``float32`` because the breathing control
+    signal and event codes are represented as numeric channels.
     """
 
     def __init__(
         self,
         name: str = "BreathingBelt",
         type: str = "Breathing",
-        channel_count: int = 1,
+        channel_count: int = 2,
         nominal_srate: float = 0,
         source_id: str = "breathingbelt001",
+        channel_labels: Iterable[str] | None = ("breath_level", "event_code"),
     ) -> None:
         """Create the LSL outlet and its associated stream metadata."""
+
+        labels = tuple(channel_labels or ())
+        if labels and len(labels) != channel_count:
+            raise ValueError("channel_labels must match channel_count when provided.")
 
         self.info = StreamInfo(
             name,
@@ -32,6 +37,11 @@ class LSLBreathingSender:
             "float32",
             source_id,
         )
+        if labels:
+            channels = self.info.desc().append_child("channels")
+            for label in labels:
+                channel = channels.append_child("channel")
+                channel.append_child_value("label", str(label))
         self.outlet = StreamOutlet(self.info)
 
     def send(self, data: float | int | Iterable[float | int]) -> None:
@@ -41,8 +51,8 @@ class LSLBreathingSender:
         ----------
         data:
             Either a scalar value or an iterable of channel values. The current
-            breathing-belt application uses a single-channel stream, but the
-            method accepts iterables to keep the wrapper generic.
+            breathing-belt application uses a two-channel stream by default,
+            but the method accepts scalars to keep the wrapper generic.
         """
 
         if isinstance(data, (float, int)):

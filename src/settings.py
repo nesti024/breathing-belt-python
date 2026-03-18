@@ -22,6 +22,7 @@ class DeviceConfig:
     read_error_backoff_s: float = 0.05
     retries: int = 3
     retry_delay_s: float = 2.0
+    invert_signal: bool = False
 
 
 @dataclass(frozen=True)
@@ -86,12 +87,20 @@ class AdaptationSettings:
 
 @dataclass(frozen=True)
 class HoldConfig:
-    """Breath-hold gating parameters for adaptive updates."""
+    """Breath-hold freeze thresholds for the control output."""
 
     activity_window_ms: int = 500
     ratio_per_sec_enter: float = 1.0
     ratio_per_sec_exit: float = 1.5
     floor_per_sec: float = 0.01
+
+
+@dataclass(frozen=True)
+class ExtremaConfig:
+    """Peak/trough confirmation parameters for breathing events."""
+
+    min_interval_ms: int = 800
+    prominence_ratio: float = 0.1
 
 
 @dataclass(frozen=True)
@@ -129,6 +138,7 @@ class AppConfig:
     calibration: CalibrationSettings
     adaptation: AdaptationSettings
     hold: HoldConfig
+    extrema: ExtremaConfig
     raw_qc: RawQCConfig
     output: OutputConfig
 
@@ -145,6 +155,7 @@ def default_config() -> AppConfig:
         calibration=CalibrationSettings(),
         adaptation=AdaptationSettings(),
         hold=HoldConfig(),
+        extrema=ExtremaConfig(),
         raw_qc=RawQCConfig(),
         output=OutputConfig(),
     )
@@ -172,6 +183,7 @@ def load_config(path: str | Path) -> AppConfig:
         calibration=_load_calibration_settings(_section(raw_config, "calibration")),
         adaptation=_load_adaptation_settings(_section(raw_config, "adaptation")),
         hold=_load_hold_config(_section(raw_config, "hold")),
+        extrema=_load_extrema_config(_section(raw_config, "extrema")),
         raw_qc=_load_raw_qc_config(_section(raw_config, "raw_qc")),
         output=_load_output_config(_section(raw_config, "output")),
     )
@@ -259,6 +271,7 @@ def _load_device_config(section: dict[str, Any]) -> DeviceConfig:
         ),
         retries=int(section.get("retries", defaults.retries)),
         retry_delay_s=float(section.get("retry_delay_s", defaults.retry_delay_s)),
+        invert_signal=bool(section.get("invert_signal", defaults.invert_signal)),
     )
 
 
@@ -393,6 +406,14 @@ def _load_raw_qc_config(section: dict[str, Any]) -> RawQCConfig:
     )
 
 
+def _load_extrema_config(section: dict[str, Any]) -> ExtremaConfig:
+    defaults = ExtremaConfig()
+    return ExtremaConfig(
+        min_interval_ms=int(section.get("min_interval_ms", defaults.min_interval_ms)),
+        prominence_ratio=float(section.get("prominence_ratio", defaults.prominence_ratio)),
+    )
+
+
 def _load_output_config(section: dict[str, Any]) -> OutputConfig:
     defaults = OutputConfig()
     return OutputConfig(root_dir=str(section.get("root_dir", defaults.root_dir)))
@@ -415,5 +436,17 @@ def _validate_config(config: AppConfig) -> None:
         raise ValueError("calibration.duration_s must be positive.")
     if config.calibration.amplitude_floor <= 0.0:
         raise ValueError("calibration.amplitude_floor must be positive.")
+    if config.hold.activity_window_ms <= 0:
+        raise ValueError("hold.activity_window_ms must be positive.")
+    if config.hold.ratio_per_sec_enter <= 0.0:
+        raise ValueError("hold.ratio_per_sec_enter must be positive.")
+    if config.hold.ratio_per_sec_exit <= config.hold.ratio_per_sec_enter:
+        raise ValueError("hold.ratio_per_sec_exit must exceed hold.ratio_per_sec_enter.")
+    if config.hold.floor_per_sec <= 0.0:
+        raise ValueError("hold.floor_per_sec must be positive.")
+    if config.extrema.min_interval_ms <= 0:
+        raise ValueError("extrema.min_interval_ms must be positive.")
+    if config.extrema.prominence_ratio <= 0.0:
+        raise ValueError("extrema.prominence_ratio must be positive.")
     if config.raw_qc.raw_saturation_lo >= config.raw_qc.raw_saturation_hi:
         raise ValueError("raw_qc saturation bounds must be ordered.")

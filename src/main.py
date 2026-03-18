@@ -107,15 +107,21 @@ def run_acquisition(config: AppConfig) -> None:
     raw_signal = deque(maxlen=plot_window_length)
     normalized_sample_indices = deque(maxlen=plot_window_length)
     normalized_signal = deque(maxlen=plot_window_length)
+    peak_sample_indices = deque(maxlen=plot_window_length)
+    peak_raw_values = deque(maxlen=plot_window_length)
+    trough_sample_indices = deque(maxlen=plot_window_length)
+    trough_raw_values = deque(maxlen=plot_window_length)
     acquisition_sample_index = 0
     pipeline_cfg = PipelineConfig(
         sampling_rate_hz=config.device.sampling_rate_hz,
         processed_sensor_column=config.device.processed_sensor_column,
+        invert_signal=config.device.invert_signal,
         filter=config.filter,
         artifact=config.artifact,
         calibration=config.calibration,
         adaptation=config.adaptation,
         hold=config.hold,
+        extrema=config.extrema,
         raw_qc=config.raw_qc,
     )
     pipeline_state = create_pipeline_state(pipeline_cfg)
@@ -151,8 +157,10 @@ def run_acquisition(config: AppConfig) -> None:
             lsl_sender = LSLBreathingSender(
                 name=config.lsl.stream_name,
                 type=config.lsl.stream_type,
+                channel_count=2,
                 nominal_srate=config.device.sampling_rate_hz,
                 source_id=config.lsl.source_id,
+                channel_labels=("breath_level", "event_code"),
             )
 
         print(
@@ -191,9 +199,19 @@ def run_acquisition(config: AppConfig) -> None:
                     if sample.normalized_value is not None:
                         normalized_sample_indices.append(acquisition_sample_index)
                         normalized_signal.append(sample.normalized_value)
+                        if sample.extrema_event_code > 0.0:
+                            peak_sample_indices.append(acquisition_sample_index)
+                            peak_raw_values.append(sample.selected_sensor_raw)
+                        elif sample.extrema_event_code < 0.0:
+                            trough_sample_indices.append(acquisition_sample_index)
+                            trough_raw_values.append(sample.selected_sensor_raw)
                         if lsl_sender is not None:
-                            lsl_sender.send(sample.normalized_value)
+                            lsl_sender.send(
+                                [sample.normalized_value, sample.extrema_event_code]
+                            )
                         print(f"Normalized: {sample.normalized_value:.4f}")
+                        if sample.extrema_event_label is not None:
+                            print(f"Breath event: {sample.extrema_event_label}")
                 acquisition_sample_index += 1
 
             if config.display.enable_plot and raw_signal and update_live_plots is not None:
@@ -232,6 +250,10 @@ def run_acquisition(config: AppConfig) -> None:
                     raw_line=raw_line,
                     normalized_ax=normalized_ax,
                     normalized_line=normalized_line,
+                    peak_times=peak_sample_indices,
+                    peak_values=peak_raw_values,
+                    trough_times=trough_sample_indices,
+                    trough_values=trough_raw_values,
                     blit_manager=blit_manager,
                 )
     finally:

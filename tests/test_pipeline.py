@@ -4,17 +4,13 @@ from __future__ import annotations
 
 import numpy as np
 
-from src.pipeline import (
-    PipelineConfig,
-    _normalize_runtime_sample,
-    create_pipeline_state,
-    process_device_row,
-)
+from src.pipeline import PipelineConfig, create_pipeline_state, process_device_row
 from src.quality import raw_qc_summary
 from src.settings import (
     AdaptationSettings,
     ArtifactConfig,
     CalibrationSettings,
+    ExtremaConfig,
     FilterConfig,
     HoldConfig,
     RawQCConfig,
@@ -28,13 +24,16 @@ def _make_pipeline_config(
     *,
     processed_sensor_column: int = 5,
     calibration_duration_s: float = 0.2,
+    invert_signal: bool = False,
     adaptation: AdaptationSettings | None = None,
     hold: HoldConfig | None = None,
+    extrema: ExtremaConfig | None = None,
     raw_qc: RawQCConfig | None = None,
 ) -> PipelineConfig:
     return PipelineConfig(
         sampling_rate_hz=FS_HZ,
         processed_sensor_column=processed_sensor_column,
+        invert_signal=invert_signal,
         filter=FilterConfig(hp_cutoff_hz=0.005, hp_order=1, lp_cutoff_hz=1.5, lp_order=2),
         artifact=ArtifactConfig(spike_threshold=2.5, artifact_window=10),
         calibration=CalibrationSettings(
@@ -53,7 +52,14 @@ def _make_pipeline_config(
             startup_center_tau_s=0.2,
             startup_amplitude_tau_s=0.2,
         ),
-        hold=hold or HoldConfig(activity_window_ms=100, ratio_per_sec_enter=0.2, ratio_per_sec_exit=0.4, floor_per_sec=0.01),
+        hold=hold
+        or HoldConfig(
+            activity_window_ms=100,
+            ratio_per_sec_enter=0.2,
+            ratio_per_sec_exit=0.4,
+            floor_per_sec=0.01,
+        ),
+        extrema=extrema or ExtremaConfig(min_interval_ms=800, prominence_ratio=0.1),
         raw_qc=raw_qc or RawQCConfig(),
     )
 
@@ -103,7 +109,7 @@ def test_pipeline_transitions_from_calibration_to_runtime() -> None:
     assert state.adaptive_state is not None
 
 
-def test_pipeline_amplitude_adapts_after_step_change() -> None:
+def test_pipeline_uses_fixed_calibration_after_amplitude_change() -> None:
     cfg = _make_pipeline_config()
     calibration_values = _make_breathing_values(cfg.calibration_target_samples, amplitude=20.0)
     runtime_low = _make_breathing_values(120, amplitude=20.0)
@@ -114,13 +120,18 @@ def test_pipeline_amplitude_adapts_after_step_change() -> None:
     )
 
     runtime_samples = [sample for sample in samples if sample.stage == "runtime"]
-    initial_amplitude = runtime_samples[0].adaptive_amplitude
-    assert initial_amplitude is not None
+    amplitudes = np.array(
+        [sample.adaptive_amplitude for sample in runtime_samples if sample.adaptive_amplitude is not None],
+        dtype=float,
+    )
+
     assert state.adaptive_state is not None
-    assert state.adaptive_state.amplitude > initial_amplitude * 1.5
+    assert amplitudes.size > 0
+    assert np.allclose(amplitudes, amplitudes[0])
+    assert np.isclose(state.adaptive_state.amplitude, amplitudes[0])
 
 
-def test_pipeline_hold_mode_freezes_adaptation() -> None:
+def test_pipeline_hold_mode_freezes_output_level() -> None:
     cfg = _make_pipeline_config()
     calibration_values = _make_breathing_values(cfg.calibration_target_samples, amplitude=25.0)
     hold_values = np.full(250, 512.0, dtype=float)
@@ -128,14 +139,44 @@ def test_pipeline_hold_mode_freezes_adaptation() -> None:
 
     runtime_samples = [sample for sample in samples if sample.stage == "runtime"]
     hold_start = next(idx for idx, sample in enumerate(runtime_samples) if sample.hold_mode_active)
-    amplitude_at_hold = runtime_samples[hold_start].adaptive_amplitude
-    amplitude_end = runtime_samples[-1].adaptive_amplitude
+    frozen_value = runtime_samples[hold_start].normalized_value
+    frozen_tail = np.array(
+        [sample.normalized_value for sample in runtime_samples[hold_start:] if sample.normalized_value is not None],
+        dtype=float,
+    )
 
+    assert frozen_value is not None
     assert runtime_samples[hold_start].hold_mode_active is True
-    assert amplitude_at_hold is not None
-    assert amplitude_end is not None
-    assert np.isclose(amplitude_end, amplitude_at_hold)
+    assert np.allclose(frozen_tail, float(frozen_value))
     assert state.hold_mode_active is True
+
+
+def test_pipeline_hold_mode_releases_immediately_when_motion_resumes() -> None:
+    cfg = _make_pipeline_config()
+    calibration_values = _make_breathing_values(cfg.calibration_target_samples, amplitude=25.0)
+    plateau_values = np.full(250, 512.0, dtype=float)
+    release_values = np.linspace(510.0, 450.0, 80, dtype=float)
+    samples, _ = _replay(
+        np.concatenate([calibration_values, plateau_values, release_values]),
+        cfg,
+    )
+
+    runtime_samples = [sample for sample in samples if sample.stage == "runtime"]
+    ramp_start_index = len(plateau_values)
+    assert any(sample.hold_mode_active for sample in runtime_samples[:ramp_start_index])
+
+    release_index = next(
+        idx
+        for idx in range(ramp_start_index, len(runtime_samples))
+        if runtime_samples[idx - 1].hold_mode_active and not runtime_samples[idx].hold_mode_active
+    )
+    release_jump = abs(
+        float(runtime_samples[release_index].normalized_value)
+        - float(runtime_samples[release_index - 1].normalized_value)
+    )
+
+    assert release_index <= ramp_start_index + 2
+    assert release_jump < 0.1
 
 
 def test_pipeline_output_remains_bounded() -> None:
@@ -169,6 +210,93 @@ def test_pipeline_selected_sensor_column_is_processed() -> None:
     assert np.isclose(sample.selected_sensor_raw, 750.0)
 
 
+def test_pipeline_invert_signal_flips_control_direction() -> None:
+    normal_cfg = _make_pipeline_config(invert_signal=False)
+    inverted_cfg = _make_pipeline_config(invert_signal=True)
+    values = np.concatenate(
+        [
+            _make_breathing_values(normal_cfg.calibration_target_samples, amplitude=20.0),
+            _make_breathing_values(120, amplitude=20.0),
+        ]
+    )
+
+    normal_samples, _ = _replay(values, normal_cfg)
+    inverted_samples, _ = _replay(values, inverted_cfg)
+    normal_runtime = next(sample for sample in normal_samples if sample.stage == "runtime")
+    inverted_runtime = next(sample for sample in inverted_samples if sample.stage == "runtime")
+
+    assert normal_runtime.normalized_value is not None
+    assert inverted_runtime.normalized_value is not None
+    assert np.isclose(
+        float(normal_runtime.normalized_value) + float(inverted_runtime.normalized_value),
+        1.0,
+        atol=0.05,
+    )
+
+
+def test_pipeline_emits_inhale_and_exhale_events_for_breath_cycles() -> None:
+    cfg = _make_pipeline_config(extrema=ExtremaConfig(min_interval_ms=600, prominence_ratio=0.05))
+    values = np.concatenate(
+        [
+            _make_breathing_values(cfg.calibration_target_samples, amplitude=20.0),
+            _make_breathing_values(800, amplitude=25.0),
+        ]
+    )
+    samples, _ = _replay(values, cfg)
+
+    runtime_samples = [sample for sample in samples if sample.stage == "runtime"]
+    labels = [sample.extrema_event_label for sample in runtime_samples if sample.extrema_event_label is not None]
+
+    assert "inhale_peak" in labels
+    assert "exhale_trough" in labels
+    assert abs(labels.count("inhale_peak") - labels.count("exhale_trough")) <= 1
+
+
+def test_pipeline_rejects_low_prominence_noise_as_extrema() -> None:
+    cfg = _make_pipeline_config(
+        calibration_duration_s=5.0,
+        extrema=ExtremaConfig(min_interval_ms=400, prominence_ratio=0.2),
+    )
+    calibration_values = _make_breathing_values(cfg.calibration_target_samples, amplitude=20.0)
+    state = create_pipeline_state(cfg)
+    for value in calibration_values:
+        _, state = process_device_row(
+            _make_row(float(value), processed_sensor_column=cfg.processed_sensor_column),
+            state,
+            cfg,
+        )
+
+    assert state.calibration_result is not None
+    assert state.adaptive_state is not None
+
+    state.filter_initialized = False
+    state.sos_lp = None
+    state.zi_lp = None
+    state.previous_filtered_value = None
+    state.previous_cleaned_value = None
+    state.previous_delta_sign = 0
+    state.last_event_sample_index = None
+    state.last_peak_value = None
+    state.last_trough_value = None
+    state.hold_mode_active = False
+    state.frozen_normalized_value = None
+    state.recent_abs_velocity.clear()
+
+    t_runtime = np.arange(500, dtype=float) / FS_HZ
+    tiny_runtime = 512.0 + 1.0 * np.sin(2.0 * np.pi * 0.22 * t_runtime)
+    samples = []
+    for value in tiny_runtime:
+        sample, state = process_device_row(
+            _make_row(float(value), processed_sensor_column=cfg.processed_sensor_column),
+            state,
+            cfg,
+        )
+        samples.append(sample)
+
+    runtime_samples = [sample for sample in samples if sample.stage == "runtime"]
+    assert all(sample.extrema_event_code == 0.0 for sample in runtime_samples)
+
+
 def test_pipeline_raw_qc_reports_saturation_flatline_and_baseline_shift() -> None:
     cfg = _make_pipeline_config(
         raw_qc=RawQCConfig(
@@ -196,33 +324,8 @@ def test_pipeline_raw_qc_reports_saturation_flatline_and_baseline_shift() -> Non
     samples, state = _replay(np.concatenate([calibration_values, runtime_values]), cfg)
 
     summary = raw_qc_summary(state.qc_state)
-    event_types = {
-        event.event_type
-        for sample in samples
-        for event in sample.qc_events
-    }
+    event_types = {event.event_type for sample in samples for event in sample.qc_events}
     assert {"saturation", "flatline", "baseline_shift"} <= event_types
     assert summary["event_counts"]["saturation"] >= 1
     assert summary["event_counts"]["flatline"] >= 1
     assert summary["event_counts"]["baseline_shift"] >= 1
-
-
-def test_runtime_artifact_gating_freezes_amplitude_update() -> None:
-    cfg = _make_pipeline_config()
-    state = create_pipeline_state(cfg)
-    calibration_values = _make_breathing_values(cfg.calibration_target_samples, amplitude=20.0)
-    for value in calibration_values:
-        _, state = process_device_row(
-            _make_row(float(value), processed_sensor_column=cfg.processed_sensor_column),
-            state,
-            cfg,
-        )
-
-    assert state.calibration_result is not None
-    assert state.adaptive_state is not None
-
-    amplitude_before = state.adaptive_state.amplitude
-    _normalize_runtime_sample(cleaned_value=25.0, is_artifact=True, state=state, cfg=cfg)
-    amplitude_after = state.adaptive_state.amplitude
-
-    assert np.isclose(amplitude_after, amplitude_before)

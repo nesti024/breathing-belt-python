@@ -18,7 +18,7 @@ def test_setup_live_plots_creates_side_by_side_dashboard() -> None:
     try:
         assert len(fig.axes) == 2
         assert raw_ax.get_title() == "Raw Sensor Signal"
-        assert normalized_ax.get_title() == "Normalized Breathing Signal (0-1 range)"
+        assert normalized_ax.get_title() == "Breath Level (0-1)"
         assert raw_line in raw_ax.lines
         assert normalized_line in normalized_ax.lines
         assert blit_manager is None
@@ -51,6 +51,30 @@ def test_update_live_plots_keeps_raw_values_and_autoscales_axis() -> None:
         raw_y_limits = raw_ax.get_ylim()
         assert raw_y_limits[0] < float(np.min(raw_values))
         assert raw_y_limits[1] > float(np.max(raw_values))
+    finally:
+        plt.close(fig)
+
+
+def test_update_live_plots_adds_peak_and_trough_markers_to_raw_axis() -> None:
+    fig, raw_ax, raw_line, normalized_ax, normalized_line, _ = setup_live_plots()
+
+    try:
+        update_live_plots(
+            raw_channel_data=np.array([10.0, 20.0, 30.0], dtype=float),
+            raw_time=np.array([0.0, 1.0, 2.0], dtype=float),
+            normalized_channel_data=np.array([0.2, 0.4, 0.6], dtype=float),
+            normalized_time=np.array([0.0, 1.0, 2.0], dtype=float),
+            raw_ax=raw_ax,
+            raw_line=raw_line,
+            normalized_ax=normalized_ax,
+            normalized_line=normalized_line,
+            peak_times=np.array([1.0], dtype=float),
+            peak_values=np.array([20.0], dtype=float),
+            trough_times=np.array([2.0], dtype=float),
+            trough_values=np.array([30.0], dtype=float),
+        )
+
+        assert len(raw_ax.collections) == 2
     finally:
         plt.close(fig)
 

@@ -10,6 +10,7 @@ timeout_s = 0.25
 read_error_backoff_s = 0.05
 retries = 3
 retry_delay_s = 2.0
+invert_signal = false
 
 [display]
 enable_plot = true
@@ -23,12 +24,16 @@ stream_type = "Breathing"
 source_id = "breathingbelt001"
 
 [filter]
+# High-pass parameters are retained for backward compatibility and are ignored
+# by the fixed-calibration VR control path.
 hp_cutoff_hz = 0.005
 hp_order = 1
 lp_cutoff_hz = 1.5
 lp_order = 2
 
 [artifact]
+# Artifact suppression settings are retained for backward compatibility and are
+# not used by the fixed-calibration VR control path.
 spike_threshold = 2.5
 artifact_window = 10
 
@@ -39,6 +44,8 @@ percentile_hi = 95.0
 amplitude_floor = 0.001
 
 [adaptation]
+# Adaptive normalization settings are retained for backward compatibility and
+# are not used by the fixed-calibration VR control path.
 center_enabled = true
 amplitude_enabled = true
 center_tau_s = 600.0
@@ -52,6 +59,10 @@ activity_window_ms = 500
 ratio_per_sec_enter = 1.0
 ratio_per_sec_exit = 1.5
 floor_per_sec = 0.01
+
+[extrema]
+min_interval_ms = 800
+prominence_ratio = 0.1
 
 [raw_qc]
 enabled = true

@@ -12,21 +12,16 @@ from .calibration import (
     AdaptiveRangeState,
     CalibrationConfig,
     CalibrationResult,
-    initialize_adaptive_range,
+    normalize_sample,
     run_range_calibration,
-    update_adaptive_range,
 )
-from .preprocessing import (
-    get_high_pass_filter_coeffs,
-    get_low_pass_filter_coeffs,
-    high_pass_filter_sample,
-    low_pass_filter_sample,
-)
+from .preprocessing import get_low_pass_filter_coeffs, low_pass_filter_sample
 from .quality import RawQCEvent, RawQCState, create_raw_qc_state, update_raw_qc
 from .settings import (
     AdaptationSettings,
     ArtifactConfig,
     CalibrationSettings,
+    ExtremaConfig,
     FilterConfig,
     HoldConfig,
     RawQCConfig,
@@ -39,11 +34,13 @@ class PipelineConfig:
 
     sampling_rate_hz: int
     processed_sensor_column: int
+    invert_signal: bool
     filter: FilterConfig
     artifact: ArtifactConfig
     calibration: CalibrationSettings
     adaptation: AdaptationSettings
     hold: HoldConfig
+    extrema: ExtremaConfig
     raw_qc: RawQCConfig
 
     @property
@@ -88,6 +85,10 @@ class PipelineConfig:
     def hold_activity_window_samples(self) -> int:
         return max(3, int(round((self.hold.activity_window_ms / 1000.0) * self.sampling_rate_hz)))
 
+    @property
+    def extrema_min_interval_samples(self) -> int:
+        return max(1, int(round((self.extrema.min_interval_ms / 1000.0) * self.sampling_rate_hz)))
+
 
 @dataclass(frozen=True)
 class PipelineSample:
@@ -104,6 +105,8 @@ class PipelineSample:
     hold_mode_active: bool
     adaptive_center: float | None
     adaptive_amplitude: float | None
+    extrema_event_code: float = 0.0
+    extrema_event_label: str | None = None
     messages: tuple[str, ...] = ()
     qc_events: tuple[RawQCEvent, ...] = ()
 
@@ -123,6 +126,7 @@ class PipelineState:
     previous_filtered_value: float | None = None
     previous_cleaned_value: float | None = None
     hold_mode_active: bool = False
+    frozen_normalized_value: float | None = None
     calibration_samples: list[float] = field(default_factory=list)
     calibration_result: CalibrationResult | None = None
     adaptive_state: AdaptiveRangeState | None = None
@@ -130,6 +134,10 @@ class PipelineState:
     startup_mode_active: bool = False
     calibration_last_reported_sec: int = -1
     stage_sample_index: int = 0
+    previous_delta_sign: int = 0
+    last_event_sample_index: int | None = None
+    last_peak_value: float | None = None
+    last_trough_value: float | None = None
 
     @property
     def stage(self) -> str:
@@ -151,7 +159,7 @@ def process_device_row(
     state: PipelineState,
     cfg: PipelineConfig,
 ) -> tuple[PipelineSample, PipelineState]:
-    """Process one BITalino row into a normalized breathing sample."""
+    """Process one BITalino row into a breathing-control sample."""
 
     stage = state.stage
     sample_index = state.stage_sample_index
@@ -174,6 +182,8 @@ def process_device_row(
     normalized_value: float | None = None
     adaptive_center: float | None = None
     adaptive_amplitude: float | None = None
+    extrema_event_code = 0.0
+    extrema_event_label: str | None = None
 
     if stage == "calibration":
         state.calibration_samples.append(cleaned_value)
@@ -192,10 +202,10 @@ def process_device_row(
                 state.calibration_samples,
                 cfg.calibration_cfg,
             )
-            state.adaptive_state = initialize_adaptive_range(
+            state.adaptive_state = _build_fixed_control_state(
                 state.calibration_samples,
                 state.calibration_result,
-                cfg.adaptive_cfg_startup,
+                cfg.calibration.amplitude_floor,
             )
             adaptive_center = float(state.adaptive_state.center)
             adaptive_amplitude = float(state.adaptive_state.amplitude)
@@ -203,37 +213,40 @@ def process_device_row(
                 [
                     "Calibration complete.",
                     (
-                        "Calibration map: "
+                        "Fixed control map: "
                         f"center={state.calibration_result.center:.6f}, "
                         f"amplitude={state.calibration_result.amplitude:.6f}, "
                         f"min={state.calibration_result.global_min:.6f}, "
                         f"max={state.calibration_result.global_max:.6f}"
                     ),
-                    (
-                        "Starting fast post-calibration adaptation for "
-                        f"{cfg.adaptation.startup_duration_s:.1f}s."
-                    ),
                 ]
             )
             state.recent_abs_velocity.clear()
             state.recent_raw_deltas.clear()
-            state.previous_cleaned_value = None
             state.previous_filtered_value = None
+            state.previous_cleaned_value = None
             state.hold_mode_active = False
+            state.frozen_normalized_value = None
             state.runtime_processed_samples = 0
-            state.startup_mode_active = True
+            state.startup_mode_active = False
+            state.previous_delta_sign = 0
+            state.last_event_sample_index = None
+            state.last_peak_value = None
+            state.last_trough_value = None
             state.stage_sample_index = 0
         else:
             state.stage_sample_index += 1
     else:
         normalized_value = _normalize_runtime_sample(cleaned_value, is_artifact, state, cfg)
+        extrema_event_code, extrema_event_label = _detect_runtime_extremum(
+            cleaned_value,
+            sample_index,
+            state,
+            cfg,
+        )
         adaptive_center = float(state.adaptive_state.center) if state.adaptive_state else None
         adaptive_amplitude = float(state.adaptive_state.amplitude) if state.adaptive_state else None
-        if state.startup_mode_active and state.runtime_processed_samples >= cfg.startup_target_samples:
-            state.startup_mode_active = False
-            messages.append(
-                "Startup adaptation complete. Switched to slow runtime tracking."
-            )
+        state.runtime_processed_samples += 1
         state.stage_sample_index += 1
 
     sample = PipelineSample(
@@ -248,6 +261,8 @@ def process_device_row(
         hold_mode_active=state.hold_mode_active if stage == "runtime" else False,
         adaptive_center=adaptive_center,
         adaptive_amplitude=adaptive_amplitude,
+        extrema_event_code=extrema_event_code if stage == "runtime" else 0.0,
+        extrema_event_label=extrema_event_label if stage == "runtime" else None,
         messages=tuple(messages),
         qc_events=tuple(qc_events),
     )
@@ -255,32 +270,22 @@ def process_device_row(
 
 
 def _filter_sample(raw_sensor_value: float, state: PipelineState, cfg: PipelineConfig) -> float:
+    control_input = -raw_sensor_value if cfg.invert_signal else raw_sensor_value
     if not state.filter_initialized:
-        state.sos_hp, state.zi_hp = get_high_pass_filter_coeffs(
-            cfg.filter.hp_cutoff_hz,
-            cfg.sampling_rate_hz,
-            cfg.filter.hp_order,
-            initial_value=raw_sensor_value,
-        )
         state.sos_lp, state.zi_lp = get_low_pass_filter_coeffs(
             cfg.filter.lp_cutoff_hz,
             cfg.sampling_rate_hz,
             cfg.filter.lp_order,
-            initial_value=0.0,
+            initial_value=control_input,
         )
         state.filter_initialized = True
 
-    high_passed_value, state.zi_hp = high_pass_filter_sample(
-        raw_sensor_value,
-        state.sos_hp,
-        state.zi_hp,
-    )
     low_passed_value, state.zi_lp = low_pass_filter_sample(
-        high_passed_value,
+        control_input,
         state.sos_lp,
         state.zi_lp,
     )
-    return -float(low_passed_value)
+    return float(low_passed_value)
 
 
 def _suppress_reversal(
@@ -288,31 +293,9 @@ def _suppress_reversal(
     state: PipelineState,
     cfg: PipelineConfig,
 ) -> tuple[float, bool]:
-    sample_value = float(filtered_value)
-    if state.previous_filtered_value is None:
-        state.previous_filtered_value = sample_value
-        state.recent_raw_deltas.clear()
-        return sample_value, False
-
-    raw_delta = sample_value - state.previous_filtered_value
-    state.recent_raw_deltas.append(raw_delta)
-
-    if len(state.recent_raw_deltas) >= 3:
-        trend_value = float(np.mean(state.recent_raw_deltas))
-        delta_scale = max(1e-3, float(np.std(state.recent_raw_deltas)))
-    else:
-        trend_value = raw_delta
-        delta_scale = max(1e-3, abs(raw_delta))
-
-    is_reversal = (
-        abs(raw_delta) > cfg.artifact.spike_threshold * delta_scale
-        and abs(trend_value) > 0.25 * delta_scale
-        and np.sign(raw_delta) != np.sign(trend_value)
-    )
-
-    state.previous_filtered_value = sample_value
-    cleaned_value = sample_value - raw_delta if is_reversal else sample_value
-    return float(cleaned_value), bool(is_reversal)
+    del state
+    del cfg
+    return float(filtered_value), False
 
 
 def _normalize_runtime_sample(
@@ -321,51 +304,145 @@ def _normalize_runtime_sample(
     state: PipelineState,
     cfg: PipelineConfig,
 ) -> float:
+    del is_artifact
     if state.adaptive_state is None:
-        raise RuntimeError("Adaptive state must be initialized before runtime normalization.")
+        raise RuntimeError("Calibration state must be initialized before runtime normalization.")
 
     value_float = float(cleaned_value)
-    if state.previous_cleaned_value is None:
+    previous_value = state.previous_cleaned_value
+    if previous_value is None:
         abs_velocity = 0.0
     else:
-        abs_velocity = abs(value_float - state.previous_cleaned_value) * cfg.sampling_rate_hz
-    state.previous_cleaned_value = value_float
+        abs_velocity = abs(value_float - previous_value) * cfg.sampling_rate_hz
     state.recent_abs_velocity.append(abs_velocity)
+    state.previous_cleaned_value = value_float
 
     if len(state.recent_abs_velocity) < state.recent_abs_velocity.maxlen:
         activity_value = float("inf")
     else:
         activity_value = float(np.mean(state.recent_abs_velocity))
 
+    amplitude = max(state.adaptive_state.amplitude, cfg.calibration.amplitude_floor)
     enter_threshold = max(
         cfg.hold.floor_per_sec,
-        state.adaptive_state.amplitude * cfg.hold.ratio_per_sec_enter,
+        amplitude * cfg.hold.ratio_per_sec_enter,
     )
     exit_threshold = max(
         cfg.hold.floor_per_sec,
-        state.adaptive_state.amplitude * cfg.hold.ratio_per_sec_exit,
+        amplitude * cfg.hold.ratio_per_sec_exit,
+    )
+
+    normalized_candidate = normalize_sample(
+        value_float,
+        center=state.adaptive_state.center,
+        amplitude=amplitude,
+        clamp=True,
     )
 
     if not state.hold_mode_active:
         if len(state.recent_abs_velocity) >= state.recent_abs_velocity.maxlen:
             state.hold_mode_active = activity_value < enter_threshold
-    elif activity_value > exit_threshold:
+            if state.hold_mode_active:
+                state.frozen_normalized_value = float(normalized_candidate)
+    elif abs_velocity > exit_threshold:
         state.hold_mode_active = False
+        state.frozen_normalized_value = None
 
-    allow_center_update = (
-        cfg.adaptation.center_enabled and (not is_artifact) and (not state.hold_mode_active)
+    if state.hold_mode_active:
+        if state.frozen_normalized_value is None:
+            state.frozen_normalized_value = float(normalized_candidate)
+        normalized_output = float(state.frozen_normalized_value)
+    else:
+        normalized_output = float(normalized_candidate)
+        state.frozen_normalized_value = normalized_output
+
+    return normalized_output
+
+
+def _detect_runtime_extremum(
+    filtered_value: float,
+    sample_index: int,
+    state: PipelineState,
+    cfg: PipelineConfig,
+) -> tuple[float, str | None]:
+    previous_value = state.previous_filtered_value
+    state.previous_filtered_value = float(filtered_value)
+    if previous_value is None:
+        state.previous_delta_sign = 0
+        return 0.0, None
+
+    delta = float(filtered_value) - previous_value
+    event_code = 0.0
+    event_label: str | None = None
+    candidate_index = max(sample_index - 1, 0)
+    prominence_threshold = max(
+        cfg.calibration.amplitude_floor,
+        cfg.extrema.prominence_ratio * max(state.adaptive_state.amplitude, cfg.calibration.amplitude_floor),
     )
-    allow_amplitude_update = (
-        cfg.adaptation.amplitude_enabled and (not is_artifact) and (not state.hold_mode_active)
+
+    if state.previous_delta_sign > 0 and delta <= 0.0:
+        if _extremum_interval_elapsed(candidate_index, state, cfg):
+            candidate_value = float(previous_value)
+            reference_value = (
+                state.last_trough_value
+                if state.last_trough_value is not None
+                else state.adaptive_state.center
+            )
+            if (
+                candidate_value - reference_value >= prominence_threshold
+            ):
+                event_code = 1.0
+                event_label = "inhale_peak"
+                state.last_event_sample_index = candidate_index
+                state.last_peak_value = candidate_value
+    elif state.previous_delta_sign < 0 and delta >= 0.0:
+        if _extremum_interval_elapsed(candidate_index, state, cfg):
+            candidate_value = float(previous_value)
+            reference_value = (
+                state.last_peak_value
+                if state.last_peak_value is not None
+                else state.adaptive_state.center
+            )
+            if (
+                reference_value - candidate_value >= prominence_threshold
+            ):
+                event_code = -1.0
+                event_label = "exhale_trough"
+                state.last_event_sample_index = candidate_index
+                state.last_trough_value = candidate_value
+
+    if delta > 0.0:
+        state.previous_delta_sign = 1
+    elif delta < 0.0:
+        state.previous_delta_sign = -1
+    else:
+        state.previous_delta_sign = 0
+    return event_code, event_label
+
+
+def _extremum_interval_elapsed(
+    candidate_index: int,
+    state: PipelineState,
+    cfg: PipelineConfig,
+) -> bool:
+    if state.last_event_sample_index is None:
+        return True
+    return (candidate_index - state.last_event_sample_index) >= cfg.extrema_min_interval_samples
+
+
+def _build_fixed_control_state(
+    calibration_samples: list[float] | np.ndarray,
+    calibration_result: CalibrationResult,
+    amplitude_floor: float,
+) -> AdaptiveRangeState:
+    samples = np.asarray(calibration_samples, dtype=float).reshape(-1)
+    center = float(calibration_result.center)
+    amplitude = max(float(calibration_result.amplitude), float(amplitude_floor))
+    abs_dev_ema = float(np.mean(np.abs(samples - center)))
+    abs_dev_to_amplitude_scale = amplitude / max(abs_dev_ema, 1e-12)
+    return AdaptiveRangeState(
+        center=center,
+        amplitude=amplitude,
+        abs_dev_ema=abs_dev_ema,
+        abs_dev_to_amplitude_scale=abs_dev_to_amplitude_scale,
     )
-    active_cfg = cfg.adaptive_cfg_startup if state.startup_mode_active else cfg.adaptive_cfg_runtime
-    normalized_value, state.adaptive_state = update_adaptive_range(
-        x=value_float,
-        state=state.adaptive_state,
-        cfg=active_cfg,
-        allow_update=allow_center_update or allow_amplitude_update,
-        allow_center_update=allow_center_update,
-        allow_amplitude_update=allow_amplitude_update,
-    )
-    state.runtime_processed_samples += 1
-    return float(normalized_value)

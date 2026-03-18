@@ -28,6 +28,7 @@ def _make_config() -> AppConfig:
         calibration=defaults.calibration,
         adaptation=defaults.adaptation,
         hold=defaults.hold,
+        extrema=defaults.extrema,
         raw_qc=defaults.raw_qc,
         output=defaults.output.__class__(root_dir="ignored-in-test"),
     )
@@ -52,6 +53,8 @@ def test_session_writer_creates_expected_files_and_rows() -> None:
             hold_mode_active=False,
             adaptive_center=None,
             adaptive_amplitude=None,
+            extrema_event_code=0.0,
+            extrema_event_label=None,
         )
         runtime_sample = PipelineSample(
             stage="runtime",
@@ -65,6 +68,8 @@ def test_session_writer_creates_expected_files_and_rows() -> None:
             hold_mode_active=False,
             adaptive_center=0.0,
             adaptive_amplitude=1.0,
+            extrema_event_code=1.0,
+            extrema_event_label="inhale_peak",
         )
         qc_event = RawQCEvent(
             event_type="saturation",
@@ -154,6 +159,8 @@ def test_session_writer_creates_expected_files_and_rows() -> None:
         assert signal_rows[0]["stage"] == "calibration"
         assert signal_rows[1]["stage"] == "runtime"
         assert signal_rows[1]["normalized_value"] == "0.600000"
+        assert signal_rows[1]["extrema_event_code"] == "1.0"
+        assert signal_rows[1]["extrema_event_label"] == "inhale_peak"
 
         with (session_dir / "qc_events.csv").open(
             "r",
@@ -168,6 +175,8 @@ def test_session_writer_creates_expected_files_and_rows() -> None:
         )
         assert stored_metadata["software_version"] == "0.1.0"
         assert stored_metadata["calibration_result"]["amplitude"] == 1.0
+        assert stored_metadata["control_model"]["mode"] == "fixed_calibration_hold_freeze_extrema"
+        assert stored_metadata["lsl_stream"]["channel_count"] == 2
         assert stored_metadata["raw_qc_summary"]["event_counts"]["saturation"] == 1
     finally:
         shutil.rmtree(root_dir, ignore_errors=True)

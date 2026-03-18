@@ -39,6 +39,8 @@ class SessionWriter:
                 "normalized_value",
                 "is_artifact",
                 "hold_mode_active",
+                "extrema_event_code",
+                "extrema_event_label",
             ],
         )
         self._signal_writer.writeheader()
@@ -108,6 +110,8 @@ class SessionWriter:
                 ),
                 "is_artifact": int(sample.is_artifact),
                 "hold_mode_active": int(sample.hold_mode_active),
+                "extrema_event_code": f"{sample.extrema_event_code:.1f}",
+                "extrema_event_label": "" if sample.extrema_event_label is None else sample.extrema_event_label,
             }
         )
 
@@ -171,6 +175,7 @@ def build_session_metadata(
         "resolved_config_path": str(resolved_config_path),
         "acquired_channels": list(config.device.channels),
         "processed_sensor_column": config.device.processed_sensor_column,
+        "invert_signal": config.device.invert_signal,
         "calibration_result": calibration_payload,
         "adaptation_settings": {
             "center_enabled": config.adaptation.center_enabled,
@@ -180,6 +185,22 @@ def build_session_metadata(
             "startup_duration_s": config.adaptation.startup_duration_s,
             "startup_center_tau_s": config.adaptation.startup_center_tau_s,
             "startup_amplitude_tau_s": config.adaptation.startup_amplitude_tau_s,
+        },
+        "control_model": {
+            "mode": "fixed_calibration_hold_freeze_extrema",
+            "lp_cutoff_hz": config.filter.lp_cutoff_hz,
+            "lp_order": config.filter.lp_order,
+            "hold_activity_window_ms": config.hold.activity_window_ms,
+            "freeze_enter_ratio_per_sec": config.hold.ratio_per_sec_enter,
+            "freeze_exit_ratio_per_sec": config.hold.ratio_per_sec_exit,
+            "freeze_floor_per_sec": config.hold.floor_per_sec,
+            "extrema_min_interval_ms": config.extrema.min_interval_ms,
+            "extrema_prominence_ratio": config.extrema.prominence_ratio,
+        },
+        "lsl_stream": {
+            "enabled": config.lsl.enable,
+            "channel_count": 2 if config.lsl.enable else 0,
+            "channel_names": ["breath_level", "event_code"] if config.lsl.enable else [],
         },
         "final_adaptive_state": adaptive_payload,
         "raw_qc_summary": qc_summary,
