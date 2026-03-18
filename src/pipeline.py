@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from collections import deque
 from dataclasses import dataclass, field
+import math
 
 import numpy as np
 
@@ -23,6 +24,7 @@ from .settings import (
     ExtremaConfig,
     FilterConfig,
     HoldConfig,
+    OutputSmoothingConfig,
     RawQCConfig,
 )
 
@@ -42,6 +44,7 @@ class PipelineConfig:
     calibration: CalibrationSettings
     adaptation: AdaptationSettings
     hold: HoldConfig
+    output_smoothing: OutputSmoothingConfig
     extrema: ExtremaConfig
     raw_qc: RawQCConfig
 
@@ -89,6 +92,18 @@ class PipelineConfig:
         return max(3, int(round((self.hold.activity_window_ms / 1000.0) * self.sampling_rate_hz)))
 
     @property
+    def output_smoothing_activity_window_samples(self) -> int:
+        return max(
+            3,
+            int(
+                round(
+                    (self.output_smoothing.activity_window_ms / 1000.0)
+                    * self.sampling_rate_hz
+                )
+            ),
+        )
+
+    @property
     def extrema_min_interval_samples(self) -> int:
         return max(1, int(round((self.extrema.min_interval_ms / 1000.0) * self.sampling_rate_hz)))
 
@@ -120,6 +135,7 @@ class PipelineState:
 
     recent_raw_deltas: deque[float]
     recent_abs_velocity: deque[float]
+    recent_output_abs_velocity: deque[float]
     qc_state: RawQCState
     filter_initialized: bool = False
     sos_hp: np.ndarray | None = None
@@ -130,6 +146,7 @@ class PipelineState:
     previous_cleaned_value: float | None = None
     hold_mode_active: bool = False
     frozen_normalized_value: float | None = None
+    emitted_normalized_value: float | None = None
     calibration_samples: list[float] = field(default_factory=list)
     calibration_result: CalibrationResult | None = None
     adaptive_state: AdaptiveRangeState | None = None
@@ -153,6 +170,7 @@ def create_pipeline_state(cfg: PipelineConfig) -> PipelineState:
     return PipelineState(
         recent_raw_deltas=deque(maxlen=max(cfg.artifact.artifact_window, 3)),
         recent_abs_velocity=deque(maxlen=cfg.hold_activity_window_samples),
+        recent_output_abs_velocity=deque(maxlen=cfg.output_smoothing_activity_window_samples),
         qc_state=create_raw_qc_state(),
     )
 
@@ -227,11 +245,13 @@ def process_device_row(
                 ]
             )
             state.recent_abs_velocity.clear()
+            state.recent_output_abs_velocity.clear()
             state.recent_raw_deltas.clear()
             state.previous_filtered_value = None
             state.previous_cleaned_value = None
             state.hold_mode_active = False
             state.frozen_normalized_value = None
+            state.emitted_normalized_value = None
             state.runtime_processed_samples = 0
             state.startup_mode_active = False
             state.previous_delta_sign = 0
@@ -320,6 +340,7 @@ def _normalize_runtime_sample(
     else:
         abs_velocity = abs(value_float - previous_value) * cfg.sampling_rate_hz
     state.recent_abs_velocity.append(abs_velocity)
+    state.recent_output_abs_velocity.append(abs_velocity)
     state.previous_cleaned_value = value_float
 
     if len(state.recent_abs_velocity) < state.recent_abs_velocity.maxlen:
@@ -339,39 +360,42 @@ def _normalize_runtime_sample(
 
     normalized_candidate = _map_control_level(value_float, state.calibration_result)
 
+    post_hold_level = normalized_candidate
     if not cfg.hold.enabled:
         state.hold_mode_active = False
-        state.frozen_normalized_value = float(normalized_candidate)
-        return float(normalized_candidate)
-
-    if not state.hold_mode_active:
-        if len(state.recent_abs_velocity) >= state.recent_abs_velocity.maxlen:
-            state.hold_mode_active = (
-                activity_value < enter_threshold
-                and abs_velocity < enter_threshold
-                and _is_extrema_zone(normalized_candidate, cfg)
-            )
-            if state.hold_mode_active:
-                state.frozen_normalized_value = float(normalized_candidate)
-    elif (
-        abs_velocity > exit_threshold
-        or (
-            state.frozen_normalized_value is not None
-            and abs(normalized_candidate - state.frozen_normalized_value) > _HOLD_RELEASE_DRIFT
-        )
-    ):
-        state.hold_mode_active = False
         state.frozen_normalized_value = None
-
-    if state.hold_mode_active:
-        if state.frozen_normalized_value is None:
-            state.frozen_normalized_value = float(normalized_candidate)
-        normalized_output = float(state.frozen_normalized_value)
     else:
-        normalized_output = float(normalized_candidate)
-        state.frozen_normalized_value = normalized_output
+        if not state.hold_mode_active:
+            if len(state.recent_abs_velocity) >= state.recent_abs_velocity.maxlen:
+                state.hold_mode_active = (
+                    activity_value < enter_threshold
+                    and abs_velocity < enter_threshold
+                    and _is_extrema_zone(normalized_candidate, cfg)
+                )
+                if state.hold_mode_active:
+                    state.frozen_normalized_value = float(normalized_candidate)
+        elif (
+            abs_velocity > exit_threshold
+            or (
+                state.frozen_normalized_value is not None
+                and abs(normalized_candidate - state.frozen_normalized_value)
+                > _HOLD_RELEASE_DRIFT
+            )
+        ):
+            state.hold_mode_active = False
+            state.frozen_normalized_value = None
 
-    return normalized_output
+        if state.hold_mode_active:
+            if state.frozen_normalized_value is None:
+                state.frozen_normalized_value = float(normalized_candidate)
+            post_hold_level = float(state.frozen_normalized_value)
+
+    return _smooth_output_level(
+        post_hold_level,
+        state,
+        cfg,
+        amplitude=amplitude,
+    )
 
 
 def _map_control_level(
@@ -385,6 +409,55 @@ def _map_control_level(
 
     mapped = (float(value) - control_min) / (control_max - control_min)
     return float(min(1.0, max(0.0, mapped)))
+
+
+def _smooth_output_level(
+    target_level: float,
+    state: PipelineState,
+    cfg: PipelineConfig,
+    *,
+    amplitude: float,
+) -> float:
+    if state.hold_mode_active and cfg.hold.enabled:
+        state.emitted_normalized_value = float(target_level)
+        return float(target_level)
+
+    if not cfg.output_smoothing.enabled:
+        state.emitted_normalized_value = float(target_level)
+        return float(target_level)
+
+    if state.emitted_normalized_value is None:
+        state.emitted_normalized_value = float(target_level)
+        return float(target_level)
+
+    low_threshold = max(
+        cfg.output_smoothing.activity_floor_per_sec,
+        amplitude * cfg.output_smoothing.activity_low_ratio_per_sec,
+    )
+    high_threshold = max(
+        cfg.output_smoothing.activity_floor_per_sec,
+        amplitude * cfg.output_smoothing.activity_high_ratio_per_sec,
+    )
+
+    if len(state.recent_output_abs_velocity) < state.recent_output_abs_velocity.maxlen:
+        activity_value = high_threshold
+    else:
+        activity_value = float(np.mean(state.recent_output_abs_velocity))
+
+    activity_ratio = (activity_value - low_threshold) / (high_threshold - low_threshold)
+    activity_ratio = float(min(1.0, max(0.0, activity_ratio)))
+    tau_s = (
+        cfg.output_smoothing.tau_hold_s
+        + activity_ratio
+        * (cfg.output_smoothing.tau_active_s - cfg.output_smoothing.tau_hold_s)
+    )
+    alpha = 1.0 - math.exp(-1.0 / (cfg.sampling_rate_hz * tau_s))
+
+    state.emitted_normalized_value = (
+        state.emitted_normalized_value
+        + alpha * (float(target_level) - state.emitted_normalized_value)
+    )
+    return float(state.emitted_normalized_value)
 
 
 def _is_extrema_zone(

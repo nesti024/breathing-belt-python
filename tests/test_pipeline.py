@@ -13,6 +13,7 @@ from src.settings import (
     ExtremaConfig,
     FilterConfig,
     HoldConfig,
+    OutputSmoothingConfig,
     RawQCConfig,
 )
 
@@ -27,6 +28,7 @@ def _make_pipeline_config(
     invert_signal: bool = False,
     adaptation: AdaptationSettings | None = None,
     hold: HoldConfig | None = None,
+    output_smoothing: OutputSmoothingConfig | None = None,
     extrema: ExtremaConfig | None = None,
     raw_qc: RawQCConfig | None = None,
 ) -> PipelineConfig:
@@ -62,6 +64,16 @@ def _make_pipeline_config(
             floor_per_sec=0.01,
             edge_margin_ratio=0.20,
         ),
+        output_smoothing=output_smoothing
+        or OutputSmoothingConfig(
+            enabled=True,
+            activity_window_ms=500,
+            tau_active_s=0.25,
+            tau_hold_s=5.0,
+            activity_low_ratio_per_sec=0.10,
+            activity_high_ratio_per_sec=0.50,
+            activity_floor_per_sec=0.01,
+        ),
         extrema=extrema or ExtremaConfig(min_interval_ms=800, prominence_ratio=0.1),
         raw_qc=raw_qc or RawQCConfig(),
     )
@@ -95,6 +107,20 @@ def _replay(values: np.ndarray, cfg: PipelineConfig) -> tuple[list, object]:
         )
         samples.append(sample)
     return samples, state
+
+
+def _mapped_candidate_levels(samples: list, state) -> np.ndarray:
+    if state.calibration_result is None:
+        raise AssertionError("Calibration result must exist for runtime candidate mapping.")
+
+    control_min = float(state.calibration_result.y_min)
+    control_max = float(state.calibration_result.y_max)
+    runtime_samples = [sample for sample in samples if sample.stage == "runtime"]
+    mapped = [
+        (sample.cleaned_value - control_min) / (control_max - control_min)
+        for sample in runtime_samples
+    ]
+    return np.clip(np.asarray(mapped, dtype=float), 0.0, 1.0)
 
 
 def test_pipeline_transitions_from_calibration_to_runtime() -> None:
@@ -135,7 +161,18 @@ def test_pipeline_uses_fixed_calibration_after_amplitude_change() -> None:
 
 
 def test_pipeline_hold_mode_freezes_output_level() -> None:
-    cfg = _make_pipeline_config(calibration_duration_s=5.0)
+    cfg = _make_pipeline_config(
+        calibration_duration_s=5.0,
+        output_smoothing=OutputSmoothingConfig(
+            enabled=False,
+            activity_window_ms=100,
+            tau_active_s=0.25,
+            tau_hold_s=5.0,
+            activity_low_ratio_per_sec=0.10,
+            activity_high_ratio_per_sec=0.50,
+            activity_floor_per_sec=0.01,
+        ),
+    )
     calibration_values = _make_breathing_values(cfg.calibration_target_samples, amplitude=25.0)
     hold_values = np.full(250, 540.0, dtype=float)
     samples, state = _replay(np.concatenate([calibration_values, hold_values]), cfg)
@@ -155,7 +192,18 @@ def test_pipeline_hold_mode_freezes_output_level() -> None:
 
 
 def test_pipeline_midrange_plateau_and_ramp_do_not_enter_hold() -> None:
-    cfg = _make_pipeline_config(calibration_duration_s=5.0)
+    cfg = _make_pipeline_config(
+        calibration_duration_s=5.0,
+        output_smoothing=OutputSmoothingConfig(
+            enabled=False,
+            activity_window_ms=100,
+            tau_active_s=0.25,
+            tau_hold_s=5.0,
+            activity_low_ratio_per_sec=0.10,
+            activity_high_ratio_per_sec=0.50,
+            activity_floor_per_sec=0.01,
+        ),
+    )
     calibration_values = _make_breathing_values(cfg.calibration_target_samples, amplitude=25.0)
     midrange_values = np.concatenate(
         [
@@ -176,7 +224,18 @@ def test_pipeline_midrange_plateau_and_ramp_do_not_enter_hold() -> None:
 
 
 def test_pipeline_hold_mode_releases_immediately_when_motion_resumes() -> None:
-    cfg = _make_pipeline_config(calibration_duration_s=5.0)
+    cfg = _make_pipeline_config(
+        calibration_duration_s=5.0,
+        output_smoothing=OutputSmoothingConfig(
+            enabled=False,
+            activity_window_ms=100,
+            tau_active_s=0.25,
+            tau_hold_s=5.0,
+            activity_low_ratio_per_sec=0.10,
+            activity_high_ratio_per_sec=0.50,
+            activity_floor_per_sec=0.01,
+        ),
+    )
     calibration_values = _make_breathing_values(cfg.calibration_target_samples, amplitude=25.0)
     plateau_values = np.full(250, 540.0, dtype=float)
     release_values = np.linspace(480.0, 450.0, 80, dtype=float)
@@ -235,8 +294,121 @@ def test_pipeline_hold_detection_can_be_disabled() -> None:
     assert np.max(np.abs(np.diff(normalized))) < 0.03
 
 
+def test_pipeline_output_smoothing_reduces_low_activity_drift_without_steps() -> None:
+    cfg = _make_pipeline_config(
+        calibration_duration_s=5.0,
+        hold=HoldConfig(
+            enabled=False,
+            activity_window_ms=100,
+            ratio_per_sec_enter=0.2,
+            ratio_per_sec_exit=0.4,
+            floor_per_sec=0.01,
+            edge_margin_ratio=0.20,
+        ),
+    )
+    calibration_values = _make_breathing_values(cfg.calibration_target_samples, amplitude=25.0)
+    runtime_values = np.concatenate(
+        [
+            np.linspace(512.0, 520.0, 200, dtype=float),
+            np.linspace(520.0, 540.0, 500, dtype=float),
+        ]
+    )
+    samples, state = _replay(np.concatenate([calibration_values, runtime_values]), cfg)
+
+    runtime_samples = [sample for sample in samples if sample.stage == "runtime"]
+    normalized = np.array(
+        [sample.normalized_value for sample in runtime_samples if sample.normalized_value is not None],
+        dtype=float,
+    )
+    candidate = _mapped_candidate_levels(samples, state)
+    drift_slice = slice(200, None)
+
+    candidate_drift = float(candidate[drift_slice][-1] - candidate[drift_slice][0])
+    normalized_drift = float(normalized[drift_slice][-1] - normalized[drift_slice][0])
+
+    assert all(not sample.hold_mode_active for sample in runtime_samples)
+    assert normalized_drift < candidate_drift * 0.70
+    assert np.max(np.abs(np.diff(normalized[drift_slice]))) < 0.01
+
+
+def test_pipeline_output_smoothing_preserves_active_breathing_responsiveness() -> None:
+    cfg = _make_pipeline_config(
+        calibration_duration_s=5.0,
+        hold=HoldConfig(
+            enabled=False,
+            activity_window_ms=100,
+            ratio_per_sec_enter=0.2,
+            ratio_per_sec_exit=0.4,
+            floor_per_sec=0.01,
+            edge_margin_ratio=0.20,
+        ),
+    )
+    calibration_values = _make_breathing_values(cfg.calibration_target_samples, amplitude=20.0)
+    runtime_values = _make_breathing_values(800, amplitude=25.0)
+    samples, state = _replay(np.concatenate([calibration_values, runtime_values]), cfg)
+
+    runtime_samples = [sample for sample in samples if sample.stage == "runtime"]
+    normalized = np.array(
+        [sample.normalized_value for sample in runtime_samples if sample.normalized_value is not None],
+        dtype=float,
+    )
+    candidate = _mapped_candidate_levels(samples, state)
+    compare_slice = slice(100, None)
+
+    assert np.max(np.abs(normalized[compare_slice] - candidate[compare_slice])) < 0.15
+    assert (np.max(normalized) - np.min(normalized)) > 0.8 * (
+        np.max(candidate) - np.min(candidate)
+    )
+
+
+def test_pipeline_output_smoothing_can_be_disabled() -> None:
+    cfg = _make_pipeline_config(
+        calibration_duration_s=5.0,
+        hold=HoldConfig(
+            enabled=False,
+            activity_window_ms=100,
+            ratio_per_sec_enter=0.2,
+            ratio_per_sec_exit=0.4,
+            floor_per_sec=0.01,
+            edge_margin_ratio=0.20,
+        ),
+        output_smoothing=OutputSmoothingConfig(
+            enabled=False,
+            activity_window_ms=100,
+            tau_active_s=0.25,
+            tau_hold_s=5.0,
+            activity_low_ratio_per_sec=0.10,
+            activity_high_ratio_per_sec=0.50,
+            activity_floor_per_sec=0.01,
+        ),
+    )
+    calibration_values = _make_breathing_values(cfg.calibration_target_samples, amplitude=20.0)
+    runtime_values = _make_breathing_values(600, amplitude=25.0)
+    samples, state = _replay(np.concatenate([calibration_values, runtime_values]), cfg)
+
+    runtime_samples = [sample for sample in samples if sample.stage == "runtime"]
+    normalized = np.array(
+        [sample.normalized_value for sample in runtime_samples if sample.normalized_value is not None],
+        dtype=float,
+    )
+    candidate = _mapped_candidate_levels(samples, state)
+
+    assert np.allclose(normalized, candidate)
+
+
 def test_pipeline_uses_padding_headroom_before_clipping() -> None:
-    cfg = _make_pipeline_config(calibration_duration_s=5.0)
+    cfg = _make_pipeline_config(
+        calibration_duration_s=5.0,
+        output_smoothing=OutputSmoothingConfig(
+            enabled=False,
+            activity_window_ms=100,
+            tau_active_s=0.25,
+            tau_hold_s=5.0,
+            activity_low_ratio_per_sec=0.10,
+            activity_high_ratio_per_sec=0.50,
+            activity_floor_per_sec=0.01,
+        ),
+    )
     calibration_values = _make_breathing_values(cfg.calibration_target_samples, amplitude=20.0)
     runtime_values = _make_breathing_values(800, amplitude=26.0)
     samples, state = _replay(np.concatenate([calibration_values, runtime_values]), cfg)
@@ -326,6 +498,57 @@ def test_pipeline_emits_inhale_and_exhale_events_for_breath_cycles() -> None:
     assert "inhale_peak" in labels
     assert "exhale_trough" in labels
     assert abs(labels.count("inhale_peak") - labels.count("exhale_trough")) <= 1
+
+
+def test_pipeline_extrema_events_match_with_or_without_output_smoothing() -> None:
+    base_hold = HoldConfig(
+        enabled=False,
+        activity_window_ms=100,
+        ratio_per_sec_enter=0.2,
+        ratio_per_sec_exit=0.4,
+        floor_per_sec=0.01,
+        edge_margin_ratio=0.20,
+    )
+    cfg_smoothed = _make_pipeline_config(
+        calibration_duration_s=5.0,
+        hold=base_hold,
+        extrema=ExtremaConfig(min_interval_ms=600, prominence_ratio=0.05),
+    )
+    cfg_unsmoothed = _make_pipeline_config(
+        calibration_duration_s=5.0,
+        hold=base_hold,
+        output_smoothing=OutputSmoothingConfig(
+            enabled=False,
+            activity_window_ms=100,
+            tau_active_s=0.25,
+            tau_hold_s=5.0,
+            activity_low_ratio_per_sec=0.10,
+            activity_high_ratio_per_sec=0.50,
+            activity_floor_per_sec=0.01,
+        ),
+        extrema=ExtremaConfig(min_interval_ms=600, prominence_ratio=0.05),
+    )
+    values = np.concatenate(
+        [
+            _make_breathing_values(cfg_smoothed.calibration_target_samples, amplitude=20.0),
+            _make_breathing_values(800, amplitude=25.0),
+        ]
+    )
+
+    smoothed_samples, _ = _replay(values, cfg_smoothed)
+    unsmoothed_samples, _ = _replay(values, cfg_unsmoothed)
+    smoothed_events = [
+        (sample.sample_index, sample.extrema_event_label)
+        for sample in smoothed_samples
+        if sample.stage == "runtime" and sample.extrema_event_label is not None
+    ]
+    unsmoothed_events = [
+        (sample.sample_index, sample.extrema_event_label)
+        for sample in unsmoothed_samples
+        if sample.stage == "runtime" and sample.extrema_event_label is not None
+    ]
+
+    assert smoothed_events == unsmoothed_events
 
 
 def test_pipeline_rejects_low_prominence_noise_as_extrema() -> None:

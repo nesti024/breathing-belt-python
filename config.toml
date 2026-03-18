@@ -65,6 +65,15 @@ floor_per_sec = 0.01
 # Only the top/bottom edge zones are eligible for hold freeze.
 edge_margin_ratio = 0.20
 
+[output_smoothing]
+enabled = true
+activity_window_ms = 500
+tau_active_s = 0.25
+tau_hold_s = 5.0
+activity_low_ratio_per_sec = 0.10
+activity_high_ratio_per_sec = 0.50
+activity_floor_per_sec = 0.01
+
 [extrema]
 min_interval_ms = 800
 prominence_ratio = 0.1

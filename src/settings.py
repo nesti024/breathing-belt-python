@@ -99,6 +99,19 @@ class HoldConfig:
 
 
 @dataclass(frozen=True)
+class OutputSmoothingConfig:
+    """Motion-adaptive smoothing for the emitted 0..1 control output."""
+
+    enabled: bool = True
+    activity_window_ms: int = 500
+    tau_active_s: float = 0.25
+    tau_hold_s: float = 5.0
+    activity_low_ratio_per_sec: float = 0.10
+    activity_high_ratio_per_sec: float = 0.50
+    activity_floor_per_sec: float = 0.01
+
+
+@dataclass(frozen=True)
 class ExtremaConfig:
     """Peak/trough confirmation parameters for breathing events."""
 
@@ -141,6 +154,7 @@ class AppConfig:
     calibration: CalibrationSettings
     adaptation: AdaptationSettings
     hold: HoldConfig
+    output_smoothing: OutputSmoothingConfig
     extrema: ExtremaConfig
     raw_qc: RawQCConfig
     output: OutputConfig
@@ -158,6 +172,7 @@ def default_config() -> AppConfig:
         calibration=CalibrationSettings(),
         adaptation=AdaptationSettings(),
         hold=HoldConfig(),
+        output_smoothing=OutputSmoothingConfig(),
         extrema=ExtremaConfig(),
         raw_qc=RawQCConfig(),
         output=OutputConfig(),
@@ -186,6 +201,9 @@ def load_config(path: str | Path) -> AppConfig:
         calibration=_load_calibration_settings(_section(raw_config, "calibration")),
         adaptation=_load_adaptation_settings(_section(raw_config, "adaptation")),
         hold=_load_hold_config(_section(raw_config, "hold")),
+        output_smoothing=_load_output_smoothing_config(
+            _section(raw_config, "output_smoothing")
+        ),
         extrema=_load_extrema_config(_section(raw_config, "extrema")),
         raw_qc=_load_raw_qc_config(_section(raw_config, "raw_qc")),
         output=_load_output_config(_section(raw_config, "output")),
@@ -379,6 +397,36 @@ def _load_hold_config(section: dict[str, Any]) -> HoldConfig:
     )
 
 
+def _load_output_smoothing_config(section: dict[str, Any]) -> OutputSmoothingConfig:
+    defaults = OutputSmoothingConfig()
+    return OutputSmoothingConfig(
+        enabled=bool(section.get("enabled", defaults.enabled)),
+        activity_window_ms=int(
+            section.get("activity_window_ms", defaults.activity_window_ms)
+        ),
+        tau_active_s=float(section.get("tau_active_s", defaults.tau_active_s)),
+        tau_hold_s=float(section.get("tau_hold_s", defaults.tau_hold_s)),
+        activity_low_ratio_per_sec=float(
+            section.get(
+                "activity_low_ratio_per_sec",
+                defaults.activity_low_ratio_per_sec,
+            )
+        ),
+        activity_high_ratio_per_sec=float(
+            section.get(
+                "activity_high_ratio_per_sec",
+                defaults.activity_high_ratio_per_sec,
+            )
+        ),
+        activity_floor_per_sec=float(
+            section.get(
+                "activity_floor_per_sec",
+                defaults.activity_floor_per_sec,
+            )
+        ),
+    )
+
+
 def _load_raw_qc_config(section: dict[str, Any]) -> RawQCConfig:
     defaults = RawQCConfig()
     return RawQCConfig(
@@ -456,6 +504,25 @@ def _validate_config(config: AppConfig) -> None:
         raise ValueError("hold.floor_per_sec must be positive.")
     if not (0.0 < config.hold.edge_margin_ratio < 0.5):
         raise ValueError("hold.edge_margin_ratio must be between 0 and 0.5.")
+    if config.output_smoothing.activity_window_ms <= 0:
+        raise ValueError("output_smoothing.activity_window_ms must be positive.")
+    if config.output_smoothing.tau_active_s <= 0.0:
+        raise ValueError("output_smoothing.tau_active_s must be positive.")
+    if config.output_smoothing.tau_hold_s <= 0.0:
+        raise ValueError("output_smoothing.tau_hold_s must be positive.")
+    if config.output_smoothing.tau_hold_s < config.output_smoothing.tau_active_s:
+        raise ValueError("output_smoothing.tau_hold_s must be >= output_smoothing.tau_active_s.")
+    if config.output_smoothing.activity_low_ratio_per_sec <= 0.0:
+        raise ValueError("output_smoothing.activity_low_ratio_per_sec must be positive.")
+    if (
+        config.output_smoothing.activity_high_ratio_per_sec
+        <= config.output_smoothing.activity_low_ratio_per_sec
+    ):
+        raise ValueError(
+            "output_smoothing.activity_high_ratio_per_sec must exceed output_smoothing.activity_low_ratio_per_sec."
+        )
+    if config.output_smoothing.activity_floor_per_sec <= 0.0:
+        raise ValueError("output_smoothing.activity_floor_per_sec must be positive.")
     if config.extrema.min_interval_ms <= 0:
         raise ValueError("extrema.min_interval_ms must be positive.")
     if config.extrema.prominence_ratio <= 0.0:

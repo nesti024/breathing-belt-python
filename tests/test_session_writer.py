@@ -28,6 +28,7 @@ def _make_config() -> AppConfig:
         calibration=defaults.calibration,
         adaptation=defaults.adaptation,
         hold=defaults.hold,
+        output_smoothing=defaults.output_smoothing,
         extrema=defaults.extrema,
         raw_qc=defaults.raw_qc,
         output=defaults.output.__class__(root_dir="ignored-in-test"),
@@ -175,13 +176,29 @@ def test_session_writer_creates_expected_files_and_rows() -> None:
         )
         assert stored_metadata["software_version"] == "0.1.0"
         assert stored_metadata["calibration_result"]["amplitude"] == 1.0
-        assert stored_metadata["control_model"]["mode"] == "fixed_calibration_padded_extrema_hold"
+        assert stored_metadata["control_model"]["mode"] == "fixed_calibration_padded_extrema_hold_output_smoothing"
         assert stored_metadata["control_model"]["calibration_padding_ratio"] == 0.2
         assert stored_metadata["control_model"]["control_min"] == -1.2
         assert stored_metadata["control_model"]["control_max"] == 1.2
         assert stored_metadata["control_model"]["hold_enabled"] is True
         assert stored_metadata["control_model"]["hold_edge_margin_ratio"] == 0.2
         assert stored_metadata["control_model"]["hold_release_drift"] == 0.03
+        assert stored_metadata["control_model"]["output_smoothing_enabled"] is True
+        assert stored_metadata["control_model"]["output_smoothing_activity_window_ms"] == 500
+        assert stored_metadata["control_model"]["output_smoothing_tau_active_s"] == 0.25
+        assert stored_metadata["control_model"]["output_smoothing_tau_hold_s"] == 5.0
+        assert (
+            stored_metadata["control_model"]["output_smoothing_activity_low_ratio_per_sec"]
+            == 0.1
+        )
+        assert (
+            stored_metadata["control_model"]["output_smoothing_activity_high_ratio_per_sec"]
+            == 0.5
+        )
+        assert (
+            stored_metadata["control_model"]["output_smoothing_activity_floor_per_sec"]
+            == 0.01
+        )
         assert stored_metadata["lsl_stream"]["channel_count"] == 2
         assert stored_metadata["raw_qc_summary"]["event_counts"]["saturation"] == 1
     finally:

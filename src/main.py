@@ -121,6 +121,7 @@ def run_acquisition(config: AppConfig) -> None:
         calibration=config.calibration,
         adaptation=config.adaptation,
         hold=config.hold,
+        output_smoothing=config.output_smoothing,
         extrema=config.extrema,
         raw_qc=config.raw_qc,
     )
