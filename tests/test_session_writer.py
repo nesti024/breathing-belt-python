@@ -175,7 +175,13 @@ def test_session_writer_creates_expected_files_and_rows() -> None:
         )
         assert stored_metadata["software_version"] == "0.1.0"
         assert stored_metadata["calibration_result"]["amplitude"] == 1.0
-        assert stored_metadata["control_model"]["mode"] == "fixed_calibration_hold_freeze_extrema"
+        assert stored_metadata["control_model"]["mode"] == "fixed_calibration_padded_extrema_hold"
+        assert stored_metadata["control_model"]["calibration_padding_ratio"] == 0.2
+        assert stored_metadata["control_model"]["control_min"] == -1.2
+        assert stored_metadata["control_model"]["control_max"] == 1.2
+        assert stored_metadata["control_model"]["hold_enabled"] is True
+        assert stored_metadata["control_model"]["hold_edge_margin_ratio"] == 0.2
+        assert stored_metadata["control_model"]["hold_release_drift"] == 0.03
         assert stored_metadata["lsl_stream"]["channel_count"] == 2
         assert stored_metadata["raw_qc_summary"]["event_counts"]["saturation"] == 1
     finally:

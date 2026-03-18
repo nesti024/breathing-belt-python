@@ -64,12 +64,13 @@ class ArtifactConfig:
 
 @dataclass(frozen=True)
 class CalibrationSettings:
-    """Percentile calibration settings for the processed signal."""
+    """Percentile calibration settings and control-map headroom."""
 
     duration_s: float = 15.0
     percentile_lo: float = 5.0
     percentile_hi: float = 95.0
     amplitude_floor: float = 1e-3
+    padding_ratio: float = 0.20
 
 
 @dataclass(frozen=True)
@@ -87,12 +88,14 @@ class AdaptationSettings:
 
 @dataclass(frozen=True)
 class HoldConfig:
-    """Breath-hold freeze thresholds for the control output."""
+    """Breath-hold freeze thresholds and extrema-zone gating."""
 
+    enabled: bool = True
     activity_window_ms: int = 500
     ratio_per_sec_enter: float = 1.0
     ratio_per_sec_exit: float = 1.5
     floor_per_sec: float = 0.01
+    edge_margin_ratio: float = 0.20
 
 
 @dataclass(frozen=True)
@@ -328,6 +331,7 @@ def _load_calibration_settings(section: dict[str, Any]) -> CalibrationSettings:
         amplitude_floor=float(
             section.get("amplitude_floor", defaults.amplitude_floor)
         ),
+        padding_ratio=float(section.get("padding_ratio", defaults.padding_ratio)),
     )
 
 
@@ -358,6 +362,7 @@ def _load_adaptation_settings(section: dict[str, Any]) -> AdaptationSettings:
 def _load_hold_config(section: dict[str, Any]) -> HoldConfig:
     defaults = HoldConfig()
     return HoldConfig(
+        enabled=bool(section.get("enabled", defaults.enabled)),
         activity_window_ms=int(
             section.get("activity_window_ms", defaults.activity_window_ms)
         ),
@@ -368,6 +373,9 @@ def _load_hold_config(section: dict[str, Any]) -> HoldConfig:
             section.get("ratio_per_sec_exit", defaults.ratio_per_sec_exit)
         ),
         floor_per_sec=float(section.get("floor_per_sec", defaults.floor_per_sec)),
+        edge_margin_ratio=float(
+            section.get("edge_margin_ratio", defaults.edge_margin_ratio)
+        ),
     )
 
 
@@ -436,6 +444,8 @@ def _validate_config(config: AppConfig) -> None:
         raise ValueError("calibration.duration_s must be positive.")
     if config.calibration.amplitude_floor <= 0.0:
         raise ValueError("calibration.amplitude_floor must be positive.")
+    if config.calibration.padding_ratio < 0.0:
+        raise ValueError("calibration.padding_ratio must be non-negative.")
     if config.hold.activity_window_ms <= 0:
         raise ValueError("hold.activity_window_ms must be positive.")
     if config.hold.ratio_per_sec_enter <= 0.0:
@@ -444,6 +454,8 @@ def _validate_config(config: AppConfig) -> None:
         raise ValueError("hold.ratio_per_sec_exit must exceed hold.ratio_per_sec_enter.")
     if config.hold.floor_per_sec <= 0.0:
         raise ValueError("hold.floor_per_sec must be positive.")
+    if not (0.0 < config.hold.edge_margin_ratio < 0.5):
+        raise ValueError("hold.edge_margin_ratio must be between 0 and 0.5.")
     if config.extrema.min_interval_ms <= 0:
         raise ValueError("extrema.min_interval_ms must be positive.")
     if config.extrema.prominence_ratio <= 0.0:

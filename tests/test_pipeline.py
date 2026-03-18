@@ -41,6 +41,7 @@ def _make_pipeline_config(
             percentile_lo=5.0,
             percentile_hi=95.0,
             amplitude_floor=1e-3,
+            padding_ratio=0.20,
         ),
         adaptation=adaptation
         or AdaptationSettings(
@@ -54,10 +55,12 @@ def _make_pipeline_config(
         ),
         hold=hold
         or HoldConfig(
+            enabled=True,
             activity_window_ms=100,
             ratio_per_sec_enter=0.2,
             ratio_per_sec_exit=0.4,
             floor_per_sec=0.01,
+            edge_margin_ratio=0.20,
         ),
         extrema=extrema or ExtremaConfig(min_interval_ms=800, prominence_ratio=0.1),
         raw_qc=raw_qc or RawQCConfig(),
@@ -132,9 +135,9 @@ def test_pipeline_uses_fixed_calibration_after_amplitude_change() -> None:
 
 
 def test_pipeline_hold_mode_freezes_output_level() -> None:
-    cfg = _make_pipeline_config()
+    cfg = _make_pipeline_config(calibration_duration_s=5.0)
     calibration_values = _make_breathing_values(cfg.calibration_target_samples, amplitude=25.0)
-    hold_values = np.full(250, 512.0, dtype=float)
+    hold_values = np.full(250, 540.0, dtype=float)
     samples, state = _replay(np.concatenate([calibration_values, hold_values]), cfg)
 
     runtime_samples = [sample for sample in samples if sample.stage == "runtime"]
@@ -151,11 +154,32 @@ def test_pipeline_hold_mode_freezes_output_level() -> None:
     assert state.hold_mode_active is True
 
 
-def test_pipeline_hold_mode_releases_immediately_when_motion_resumes() -> None:
-    cfg = _make_pipeline_config()
+def test_pipeline_midrange_plateau_and_ramp_do_not_enter_hold() -> None:
+    cfg = _make_pipeline_config(calibration_duration_s=5.0)
     calibration_values = _make_breathing_values(cfg.calibration_target_samples, amplitude=25.0)
-    plateau_values = np.full(250, 512.0, dtype=float)
-    release_values = np.linspace(510.0, 450.0, 80, dtype=float)
+    midrange_values = np.concatenate(
+        [
+            np.full(250, 512.0, dtype=float),
+            np.linspace(500.0, 520.0, 250, dtype=float),
+        ]
+    )
+    samples, _ = _replay(np.concatenate([calibration_values, midrange_values]), cfg)
+
+    runtime_samples = [sample for sample in samples if sample.stage == "runtime"]
+    normalized = np.array(
+        [sample.normalized_value for sample in runtime_samples if sample.normalized_value is not None],
+        dtype=float,
+    )
+
+    assert all(not sample.hold_mode_active for sample in runtime_samples)
+    assert np.max(np.abs(np.diff(normalized))) < 0.03
+
+
+def test_pipeline_hold_mode_releases_immediately_when_motion_resumes() -> None:
+    cfg = _make_pipeline_config(calibration_duration_s=5.0)
+    calibration_values = _make_breathing_values(cfg.calibration_target_samples, amplitude=25.0)
+    plateau_values = np.full(250, 540.0, dtype=float)
+    release_values = np.linspace(480.0, 450.0, 80, dtype=float)
     samples, _ = _replay(
         np.concatenate([calibration_values, plateau_values, release_values]),
         cfg,
@@ -177,6 +201,58 @@ def test_pipeline_hold_mode_releases_immediately_when_motion_resumes() -> None:
 
     assert release_index <= ramp_start_index + 2
     assert release_jump < 0.1
+    assert not any(sample.hold_mode_active for sample in runtime_samples[release_index : release_index + 10])
+
+
+def test_pipeline_hold_detection_can_be_disabled() -> None:
+    cfg = _make_pipeline_config(
+        calibration_duration_s=5.0,
+        hold=HoldConfig(
+            enabled=False,
+            activity_window_ms=100,
+            ratio_per_sec_enter=0.2,
+            ratio_per_sec_exit=0.4,
+            floor_per_sec=0.01,
+            edge_margin_ratio=0.20,
+        ),
+    )
+    calibration_values = _make_breathing_values(cfg.calibration_target_samples, amplitude=25.0)
+    hold_like_values = np.concatenate(
+        [
+            np.full(250, 540.0, dtype=float),
+            np.linspace(540.0, 300.0, 250, dtype=float),
+        ]
+    )
+    samples, _ = _replay(np.concatenate([calibration_values, hold_like_values]), cfg)
+
+    runtime_samples = [sample for sample in samples if sample.stage == "runtime"]
+    normalized = np.array(
+        [sample.normalized_value for sample in runtime_samples if sample.normalized_value is not None],
+        dtype=float,
+    )
+
+    assert all(not sample.hold_mode_active for sample in runtime_samples)
+    assert np.max(np.abs(np.diff(normalized))) < 0.03
+
+
+def test_pipeline_uses_padding_headroom_before_clipping() -> None:
+    cfg = _make_pipeline_config(calibration_duration_s=5.0)
+    calibration_values = _make_breathing_values(cfg.calibration_target_samples, amplitude=20.0)
+    runtime_values = _make_breathing_values(800, amplitude=26.0)
+    samples, state = _replay(np.concatenate([calibration_values, runtime_values]), cfg)
+
+    assert state.calibration_result is not None
+    runtime_samples = [sample for sample in samples if sample.stage == "runtime"]
+    in_headroom = [
+        sample
+        for sample in runtime_samples
+        if state.calibration_result.global_max < sample.filtered_value < state.calibration_result.y_max
+    ]
+
+    assert in_headroom
+    assert all(sample.normalized_value is not None for sample in in_headroom)
+    assert all(float(sample.normalized_value) < 1.0 for sample in in_headroom)
+    assert max(float(sample.normalized_value) for sample in in_headroom) > (1.0 - cfg.hold.edge_margin_ratio)
 
 
 def test_pipeline_output_remains_bounded() -> None:

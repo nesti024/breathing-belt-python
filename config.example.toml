@@ -41,6 +41,8 @@ duration_s = 15.0
 percentile_lo = 5.0
 percentile_hi = 95.0
 amplitude_floor = 0.001
+# Extra headroom applied to the fixed control map before clamping to 0..1.
+padding_ratio = 0.20
 
 [adaptation]
 # Adaptive normalization settings are retained for backward compatibility and
@@ -54,10 +56,13 @@ startup_center_tau_s = 25.0
 startup_amplitude_tau_s = 25.0
 
 [hold]
+enabled = true
 activity_window_ms = 500
 ratio_per_sec_enter = 1.0
 ratio_per_sec_exit = 1.5
 floor_per_sec = 0.01
+# Only the top/bottom edge zones are eligible for hold freeze.
+edge_margin_ratio = 0.20
 
 [extrema]
 min_interval_ms = 800

@@ -10,9 +10,9 @@ This repository provides:
 - BITalino acquisition through a threaded reader
 - real-time low-pass filtering for VR-oriented breathing control
 - percentile-based startup calibration
-- fixed-calibration mapping into a continuous `0..1` breath level
+- fixed-calibration mapping with padded control headroom into a continuous `0..1` breath level
 - inhale-peak and exhale-trough event detection
-- breath-hold output freezing to minimize sphere drift during holds
+- breath-hold output freezing near inhale/exhale extremes to minimize sphere drift during holds
 - raw-signal quality-control warnings and logging
 - live plotting and optional LSL streaming
 - automatic per-run export of raw rows, derived signals, QC events, and metadata
@@ -56,8 +56,8 @@ Important config fields:
 - `device.processed_sensor_column`: device-row column used for the normalized signal
 - `device.invert_signal`: flips the control-signal polarity when inhale/exhale direction is reversed
 - `filter.lp_*`: low-pass control filter parameters
-- `calibration.*`: processed-signal calibration settings
-- `hold.*`: breath-hold freeze thresholds for the output level
+- `calibration.*`: processed-signal calibration settings, including control-map headroom via `padding_ratio`
+- `hold.*`: breath-hold freeze thresholds and the extrema-zone gate via `edge_margin_ratio`; set `hold.enabled = false` to disable hold detection for testing
 - `extrema.*`: minimum interval and prominence thresholds for inhale/exhale events
 - `raw_qc.*`: raw-signal clipping, flatline, and baseline-shift thresholds
 - `output.root_dir`: parent directory for timestamped session exports
@@ -115,16 +115,19 @@ The `stage` column distinguishes `calibration` from `runtime`.
 
 The live control path is:
 
-`raw selected channel -> optional polarity inversion -> low-pass filter -> fixed startup calibration -> clamped 0..1 breath level`
+`raw selected channel -> optional polarity inversion -> low-pass filter -> fixed startup calibration -> padded control bounds -> clamped 0..1 breath level`
 
 Calibration:
 - runs on the processed signal
 - uses percentile bounds (`percentile_lo`, `percentile_hi`)
-- estimates a fixed center and amplitude for the runtime control map
+- estimates a fixed center and amplitude for hold/event thresholds
+- expands the runtime control map with `padding_ratio` headroom before clamping to `0..1`
 
 Runtime control:
 - uses the fixed startup calibration for the entire run
-- freezes the emitted `0..1` value during low-activity breath holds
+- maps the filtered signal through the padded control bounds so full breaths do not clip as early
+- optionally freezes the emitted `0..1` value during low-activity breath holds near the top or bottom `edge_margin_ratio` of the range
+- releases freeze immediately when motion resumes or the live control value drifts away from the frozen value
 - emits `1.0` on inhale peaks and `-1.0` on exhale troughs
 
 LSL:

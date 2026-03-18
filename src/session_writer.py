@@ -168,6 +168,8 @@ def build_session_metadata(
 
     calibration_payload = None if calibration_result is None else asdict(calibration_result)
     adaptive_payload = None if adaptive_state is None else asdict(adaptive_state)
+    control_min = None if calibration_result is None else float(calibration_result.y_min)
+    control_max = None if calibration_result is None else float(calibration_result.y_max)
     metadata = {
         "started_at": started_at,
         "ended_at": ended_at,
@@ -187,13 +189,19 @@ def build_session_metadata(
             "startup_amplitude_tau_s": config.adaptation.startup_amplitude_tau_s,
         },
         "control_model": {
-            "mode": "fixed_calibration_hold_freeze_extrema",
+            "mode": "fixed_calibration_padded_extrema_hold",
             "lp_cutoff_hz": config.filter.lp_cutoff_hz,
             "lp_order": config.filter.lp_order,
+            "calibration_padding_ratio": config.calibration.padding_ratio,
+            "control_min": control_min,
+            "control_max": control_max,
+            "hold_enabled": config.hold.enabled,
             "hold_activity_window_ms": config.hold.activity_window_ms,
             "freeze_enter_ratio_per_sec": config.hold.ratio_per_sec_enter,
             "freeze_exit_ratio_per_sec": config.hold.ratio_per_sec_exit,
             "freeze_floor_per_sec": config.hold.floor_per_sec,
+            "hold_edge_margin_ratio": config.hold.edge_margin_ratio,
+            "hold_release_drift": 0.03,
             "extrema_min_interval_ms": config.extrema.min_interval_ms,
             "extrema_prominence_ratio": config.extrema.prominence_ratio,
         },

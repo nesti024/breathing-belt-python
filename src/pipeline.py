@@ -12,7 +12,6 @@ from .calibration import (
     AdaptiveRangeState,
     CalibrationConfig,
     CalibrationResult,
-    normalize_sample,
     run_range_calibration,
 )
 from .preprocessing import get_low_pass_filter_coeffs, low_pass_filter_sample
@@ -26,6 +25,9 @@ from .settings import (
     HoldConfig,
     RawQCConfig,
 )
+
+
+_HOLD_RELEASE_DRIFT = 0.03
 
 
 @dataclass(frozen=True)
@@ -53,6 +55,7 @@ class PipelineConfig:
             saturation_lo=float("-inf"),
             saturation_hi=float("inf"),
             amplitude_floor=self.calibration.amplitude_floor,
+            padding_ratio=self.calibration.padding_ratio,
         )
 
     @property
@@ -217,7 +220,9 @@ def process_device_row(
                         f"center={state.calibration_result.center:.6f}, "
                         f"amplitude={state.calibration_result.amplitude:.6f}, "
                         f"min={state.calibration_result.global_min:.6f}, "
-                        f"max={state.calibration_result.global_max:.6f}"
+                        f"max={state.calibration_result.global_max:.6f}, "
+                        f"control_min={state.calibration_result.y_min:.6f}, "
+                        f"control_max={state.calibration_result.y_max:.6f}"
                     ),
                 ]
             )
@@ -305,7 +310,7 @@ def _normalize_runtime_sample(
     cfg: PipelineConfig,
 ) -> float:
     del is_artifact
-    if state.adaptive_state is None:
+    if state.adaptive_state is None or state.calibration_result is None:
         raise RuntimeError("Calibration state must be initialized before runtime normalization.")
 
     value_float = float(cleaned_value)
@@ -322,7 +327,7 @@ def _normalize_runtime_sample(
     else:
         activity_value = float(np.mean(state.recent_abs_velocity))
 
-    amplitude = max(state.adaptive_state.amplitude, cfg.calibration.amplitude_floor)
+    amplitude = max(state.calibration_result.amplitude, cfg.calibration.amplitude_floor)
     enter_threshold = max(
         cfg.hold.floor_per_sec,
         amplitude * cfg.hold.ratio_per_sec_enter,
@@ -332,19 +337,29 @@ def _normalize_runtime_sample(
         amplitude * cfg.hold.ratio_per_sec_exit,
     )
 
-    normalized_candidate = normalize_sample(
-        value_float,
-        center=state.adaptive_state.center,
-        amplitude=amplitude,
-        clamp=True,
-    )
+    normalized_candidate = _map_control_level(value_float, state.calibration_result)
+
+    if not cfg.hold.enabled:
+        state.hold_mode_active = False
+        state.frozen_normalized_value = float(normalized_candidate)
+        return float(normalized_candidate)
 
     if not state.hold_mode_active:
         if len(state.recent_abs_velocity) >= state.recent_abs_velocity.maxlen:
-            state.hold_mode_active = activity_value < enter_threshold
+            state.hold_mode_active = (
+                activity_value < enter_threshold
+                and abs_velocity < enter_threshold
+                and _is_extrema_zone(normalized_candidate, cfg)
+            )
             if state.hold_mode_active:
                 state.frozen_normalized_value = float(normalized_candidate)
-    elif abs_velocity > exit_threshold:
+    elif (
+        abs_velocity > exit_threshold
+        or (
+            state.frozen_normalized_value is not None
+            and abs(normalized_candidate - state.frozen_normalized_value) > _HOLD_RELEASE_DRIFT
+        )
+    ):
         state.hold_mode_active = False
         state.frozen_normalized_value = None
 
@@ -357,6 +372,27 @@ def _normalize_runtime_sample(
         state.frozen_normalized_value = normalized_output
 
     return normalized_output
+
+
+def _map_control_level(
+    value: float,
+    calibration_result: CalibrationResult,
+) -> float:
+    control_min = float(calibration_result.y_min)
+    control_max = float(calibration_result.y_max)
+    if control_max <= control_min:
+        raise RuntimeError("Control bounds must define a positive range.")
+
+    mapped = (float(value) - control_min) / (control_max - control_min)
+    return float(min(1.0, max(0.0, mapped)))
+
+
+def _is_extrema_zone(
+    normalized_value: float,
+    cfg: PipelineConfig,
+) -> bool:
+    edge_margin = cfg.hold.edge_margin_ratio
+    return normalized_value <= edge_margin or normalized_value >= (1.0 - edge_margin)
 
 
 def _detect_runtime_extremum(
