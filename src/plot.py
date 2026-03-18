@@ -3,13 +3,18 @@
 from __future__ import annotations
 
 from typing import Sequence
+import warnings
 
 import matplotlib.pyplot as plt
 import numpy as np
 from matplotlib.axes import Axes
 from matplotlib.backend_bases import FigureCanvasBase
-from matplotlib.lines import Line2D
 from matplotlib.figure import Figure
+from matplotlib.lines import Line2D
+
+
+_RAW_Y_PADDING_RATIO = 0.05
+_RAW_MIN_Y_SPAN = 1.0
 
 
 def plot_breathing_channel(
@@ -37,26 +42,24 @@ def plot_breathing_channel(
     del blit_manager  # Reserved for future optimization; unused in scrolling mode.
 
     channel_data = channel_data[-200:]
-    # Clipping is applied only to the displayed trace. The underlying signal
-    # used for calibration and streaming is unchanged.
-    channel_data = np.clip(np.asarray(channel_data, dtype=float), 0.0, 1.0)
     if time is not None:
         time = time[-200:]
 
     if live and ax is not None and line is not None:
-        if time is not None:
-            line.set_xdata(time)
-            ax.set_xlim(min(time) if len(time) > 0 else 0, max(time) if len(time) > 0 else 1)
-        else:
-            line.set_xdata(range(len(channel_data)))
-            ax.set_xlim(0, max(len(channel_data) - 1, 1))
-
-        line.set_ydata(channel_data)
-        ax.set_ylim(0, 1)
-        # Use a full redraw for scrolling axes; blitting leaves stale pixels in
-        # this usage mode more often than it improves performance.
-        plt.pause(0.001)
+        _update_live_line(
+            channel_data=channel_data,
+            time=time,
+            ax=ax,
+            line=line,
+            clip_range=(0.0, 1.0),
+            fixed_ylim=(0.0, 1.0),
+        )
+        _refresh_live_canvas()
         return
+
+    # Clipping is applied only to the displayed trace. The underlying signal
+    # used for calibration and streaming is unchanged.
+    channel_data = np.clip(np.asarray(channel_data, dtype=float), 0.0, 1.0)
 
     plt.figure(figsize=(10, 4))
     if time is not None:
@@ -77,6 +80,7 @@ def setup_live_plot(
     title: str = "Breathing Belt Channel Visualization",
 ) -> tuple[Figure, Axes, Line2D, None]:
     """Create and show an interactive plot for the normalized respiration trace."""
+
     plt.ion()
     fig, ax = plt.subplots(figsize=(10, 4))
     line, = ax.plot([], [], label="Breathing Signal")
@@ -86,12 +90,175 @@ def setup_live_plot(
     ax.set_title(title)
     ax.legend()
     plt.tight_layout()
-    plt.show(block=False)
-    plt.pause(0.01)
+    _show_live_figure()
 
     # Disabled for scrolling x-limits to avoid stale or ghost rendering artifacts.
     blit_manager = None
     return fig, ax, line, blit_manager
+
+
+def setup_live_plots(
+    *,
+    raw_title: str = "Raw Sensor Signal",
+    normalized_title: str = "Normalized Breathing Signal (0-1 range)",
+) -> tuple[Figure, Axes, Line2D, Axes, Line2D, None]:
+    """Create and show a two-panel live dashboard for raw and normalized traces."""
+
+    plt.ion()
+    fig, (raw_ax, normalized_ax) = plt.subplots(1, 2, figsize=(14, 4))
+    raw_line, = raw_ax.plot([], [], label="Raw Sensor Signal")
+    normalized_line, = normalized_ax.plot([], [], label="Breathing Signal")
+
+    raw_ax.set_xlabel("Sample")
+    raw_ax.set_ylabel("Raw Amplitude")
+    raw_ax.set_xlim(0, 1)
+    raw_ax.set_ylim(0, 1)
+    raw_ax.set_title(raw_title)
+    raw_ax.legend()
+
+    normalized_ax.set_xlabel("Sample")
+    normalized_ax.set_ylabel("Amplitude")
+    normalized_ax.set_xlim(0, 1)
+    normalized_ax.set_ylim(0, 1)
+    normalized_ax.set_title(normalized_title)
+    normalized_ax.legend()
+
+    plt.tight_layout()
+    _show_live_figure()
+
+    # Disabled for scrolling x-limits to avoid stale or ghost rendering artifacts.
+    blit_manager = None
+    return fig, raw_ax, raw_line, normalized_ax, normalized_line, blit_manager
+
+
+def update_live_plots(
+    raw_channel_data: Sequence[float] | np.ndarray,
+    raw_time: Sequence[float] | np.ndarray | None,
+    normalized_channel_data: Sequence[float] | np.ndarray,
+    normalized_time: Sequence[float] | np.ndarray | None,
+    *,
+    raw_ax: Axes,
+    raw_line: Line2D,
+    normalized_ax: Axes,
+    normalized_line: Line2D,
+    blit_manager: "BlitManager | None" = None,
+) -> None:
+    """Update the live raw and normalized plots in one redraw pass."""
+
+    del blit_manager  # Reserved for future optimization; unused in scrolling mode.
+
+    _update_live_line(
+        channel_data=raw_channel_data,
+        time=raw_time,
+        ax=raw_ax,
+        line=raw_line,
+        autoscale_y=True,
+        min_y_span=_RAW_MIN_Y_SPAN,
+        y_padding_ratio=_RAW_Y_PADDING_RATIO,
+    )
+    _update_live_line(
+        channel_data=normalized_channel_data,
+        time=normalized_time,
+        ax=normalized_ax,
+        line=normalized_line,
+        clip_range=(0.0, 1.0),
+        fixed_ylim=(0.0, 1.0),
+    )
+    _refresh_live_canvas()
+
+
+def _update_live_line(
+    *,
+    channel_data: Sequence[float] | np.ndarray,
+    time: Sequence[float] | np.ndarray | None,
+    ax: Axes,
+    line: Line2D,
+    clip_range: tuple[float, float] | None = None,
+    fixed_ylim: tuple[float, float] | None = None,
+    autoscale_y: bool = False,
+    min_y_span: float = _RAW_MIN_Y_SPAN,
+    y_padding_ratio: float = _RAW_Y_PADDING_RATIO,
+) -> None:
+    values = np.asarray(channel_data, dtype=float)
+    if clip_range is not None:
+        values = np.clip(values, clip_range[0], clip_range[1])
+
+    if time is None:
+        x_values = np.arange(values.size, dtype=float)
+    else:
+        x_values = np.asarray(time, dtype=float)
+        if x_values.shape != values.shape:
+            raise ValueError("time and channel_data must have matching shapes for live updates.")
+
+    line.set_xdata(x_values)
+    line.set_ydata(values)
+    ax.set_xlim(*_compute_x_limits(x_values))
+
+    if fixed_ylim is not None:
+        ax.set_ylim(*fixed_ylim)
+    elif autoscale_y:
+        ax.set_ylim(
+            *_compute_padded_y_limits(
+                values,
+                min_y_span=min_y_span,
+                padding_ratio=y_padding_ratio,
+            )
+        )
+
+
+def _compute_x_limits(x_values: np.ndarray) -> tuple[float, float]:
+    if x_values.size == 0:
+        return 0.0, 1.0
+
+    x_min = float(x_values[0])
+    x_max = float(x_values[-1])
+    if x_min == x_max:
+        x_max = x_min + 1.0
+    return x_min, x_max
+
+
+def _compute_padded_y_limits(
+    values: np.ndarray,
+    *,
+    min_y_span: float,
+    padding_ratio: float,
+) -> tuple[float, float]:
+    if values.size == 0:
+        return 0.0, 1.0
+
+    y_min = float(np.min(values))
+    y_max = float(np.max(values))
+    span = y_max - y_min
+    if span < min_y_span:
+        center = 0.5 * (y_min + y_max)
+        half_span = 0.5 * min_y_span
+        return center - half_span, center + half_span
+
+    padding = span * padding_ratio
+    return y_min - padding, y_max + padding
+
+
+def _refresh_live_canvas() -> None:
+    # Use a full redraw for scrolling axes; blitting leaves stale pixels in
+    # this usage mode more often than it improves performance.
+    with warnings.catch_warnings():
+        warnings.filterwarnings(
+            "ignore",
+            message="FigureCanvasAgg is non-interactive, and thus cannot be shown",
+            category=UserWarning,
+        )
+        plt.pause(0.001)
+
+
+def _show_live_figure() -> None:
+    with warnings.catch_warnings():
+        warnings.filterwarnings(
+            "ignore",
+            message="FigureCanvasAgg is non-interactive, and thus cannot be shown",
+            category=UserWarning,
+        )
+        plt.show(block=False)
+        plt.pause(0.01)
 
 
 class BlitManager:

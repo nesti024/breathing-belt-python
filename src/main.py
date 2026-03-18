@@ -29,9 +29,9 @@ if __package__ in {None, ""}:
         return BreathBelt
 
     def _import_plot_helpers():
-        from src.plot import plot_breathing_channel, setup_live_plot
+        from src.plot import setup_live_plots, update_live_plots
 
-        return plot_breathing_channel, setup_live_plot
+        return setup_live_plots, update_live_plots
 
     def _import_lsl_sender():
         from src.lsl_out import LSLBreathingSender
@@ -50,9 +50,9 @@ else:
         return BreathBelt
 
     def _import_plot_helpers():
-        from .plot import plot_breathing_channel, setup_live_plot
+        from .plot import setup_live_plots, update_live_plots
 
-        return plot_breathing_channel, setup_live_plot
+        return setup_live_plots, update_live_plots
 
     def _import_lsl_sender():
         from .lsl_out import LSLBreathingSender
@@ -97,11 +97,17 @@ def run_acquisition(config: AppConfig) -> None:
     belt = None
     session_writer = None
     lsl_sender = None
-    ax_final = None
-    line_final = None
-    blit_manager_final = None
-    sample_indices = deque(maxlen=config.device.queue_max_samples)
-    normalized_signal = deque(maxlen=config.device.queue_max_samples)
+    raw_ax = None
+    raw_line = None
+    normalized_ax = None
+    normalized_line = None
+    blit_manager = None
+    plot_window_length = config.display.plot_window_length
+    raw_sample_indices = deque(maxlen=plot_window_length)
+    raw_signal = deque(maxlen=plot_window_length)
+    normalized_sample_indices = deque(maxlen=plot_window_length)
+    normalized_signal = deque(maxlen=plot_window_length)
+    acquisition_sample_index = 0
     pipeline_cfg = PipelineConfig(
         sampling_rate_hz=config.device.sampling_rate_hz,
         processed_sensor_column=config.device.processed_sensor_column,
@@ -133,10 +139,12 @@ def run_acquisition(config: AppConfig) -> None:
         session_writer = SessionWriter(config.output.root_dir, config)
 
         if config.display.enable_plot:
-            plot_breathing_channel, setup_live_plot = _import_plot_helpers()
-            _, ax_final, line_final, blit_manager_final = setup_live_plot(
-                "Normalized Breathing Signal (0-1 range)"
+            setup_live_plots, update_live_plots = _import_plot_helpers()
+            _, raw_ax, raw_line, normalized_ax, normalized_line, blit_manager = (
+                setup_live_plots()
             )
+        else:
+            update_live_plots = None
 
         if config.lsl.enable:
             LSLBreathingSender = _import_lsl_sender()
@@ -154,7 +162,6 @@ def run_acquisition(config: AppConfig) -> None:
         print("Breathe normally and include full inhale/exhale range.")
         print("Press 'c' to stop acquisition.")
 
-        runtime_plot_started = False
         while not keyboard.is_pressed("c"):
             data = belt.get_all()
             if data.size == 0:
@@ -177,49 +184,55 @@ def run_acquisition(config: AppConfig) -> None:
                     print(f"WARNING [{event.event_type}]: {event.message}")
                     session_writer.write_qc_event(event)
 
+                raw_sample_indices.append(acquisition_sample_index)
+                raw_signal.append(sample.selected_sensor_raw)
+
                 if sample.stage == "runtime":
-                    if sample.sample_index == 0 and not runtime_plot_started:
-                        sample_indices.clear()
-                        normalized_signal.clear()
-                        runtime_plot_started = True
-                    sample_indices.append(sample.sample_index)
                     if sample.normalized_value is not None:
+                        normalized_sample_indices.append(acquisition_sample_index)
                         normalized_signal.append(sample.normalized_value)
                         if lsl_sender is not None:
                             lsl_sender.send(sample.normalized_value)
                         print(f"Normalized: {sample.normalized_value:.4f}")
+                acquisition_sample_index += 1
 
-            if config.display.enable_plot and normalized_signal:
-                normalized_array = np.asarray(normalized_signal, dtype=float)
-                n_plot = min(
-                    config.display.plot_window_length,
-                    len(normalized_array),
-                    len(sample_indices),
-                )
-                plot_window = normalized_array[-n_plot:]
-                window_min = float(np.min(plot_window))
-                window_max = float(np.max(plot_window))
+            if config.display.enable_plot and raw_signal and update_live_plots is not None:
+                if normalized_signal:
+                    normalized_array = np.asarray(normalized_signal, dtype=float)
+                    window_min = float(np.min(normalized_array))
+                    window_max = float(np.max(normalized_array))
+                else:
+                    normalized_array = np.asarray([], dtype=float)
+                    window_min = 0.0
+                    window_max = 0.0
+
                 if (
                     config.display.debug_plot_window_bounds
-                    and sample_indices
-                    and (sample_indices[-1] % config.device.sampling_rate_hz) < len(data)
+                    and normalized_sample_indices
+                    and (
+                        normalized_sample_indices[-1] % config.device.sampling_rate_hz
+                    ) < len(data)
                 ):
                     print(
                         f"Plot window range check: min={window_min:.4f}, "
-                        f"max={window_max:.4f}, points={n_plot}"
+                        f"max={window_max:.4f}, points={len(normalized_array)}"
                     )
-                if window_min < 0.0 or window_max > 1.0:
+                if normalized_array.size > 0 and (window_min < 0.0 or window_max > 1.0):
                     print(
                         "WARNING: plotted window out of [0,1] "
                         f"(min={window_min:.6f}, max={window_max:.6f})"
                     )
-                plot_breathing_channel(
-                    plot_window,
-                    list(sample_indices)[-n_plot:],
-                    live=True,
-                    ax=ax_final,
-                    line=line_final,
-                    blit_manager=blit_manager_final,
+
+                update_live_plots(
+                    raw_signal,
+                    raw_sample_indices,
+                    normalized_signal,
+                    normalized_sample_indices,
+                    raw_ax=raw_ax,
+                    raw_line=raw_line,
+                    normalized_ax=normalized_ax,
+                    normalized_line=normalized_line,
+                    blit_manager=blit_manager,
                 )
     finally:
         print("Stopping acquisition...")
