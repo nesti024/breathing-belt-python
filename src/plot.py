@@ -41,10 +41,6 @@ def plot_breathing_channel(
 
     del blit_manager  # Reserved for future optimization; unused in scrolling mode.
 
-    channel_data = channel_data[-200:]
-    if time is not None:
-        time = time[-200:]
-
     if live and ax is not None and line is not None:
         _update_live_line(
             channel_data=channel_data,
@@ -150,12 +146,17 @@ def update_live_plots(
     """Update the live raw and normalized plots in one redraw pass."""
 
     del blit_manager  # Reserved for future optimization; unused in scrolling mode.
+    shared_x_limits = _compute_shared_x_limits(
+        _coerce_x_values(raw_channel_data, raw_time),
+        _coerce_x_values(normalized_channel_data, normalized_time),
+    )
 
     _update_live_line(
         channel_data=raw_channel_data,
         time=raw_time,
         ax=raw_ax,
         line=raw_line,
+        x_limits=shared_x_limits,
         autoscale_y=True,
         min_y_span=_RAW_MIN_Y_SPAN,
         y_padding_ratio=_RAW_Y_PADDING_RATIO,
@@ -165,6 +166,7 @@ def update_live_plots(
         time=normalized_time,
         ax=normalized_ax,
         line=normalized_line,
+        x_limits=shared_x_limits,
         clip_range=(0.0, 1.0),
         fixed_ylim=(0.0, 1.0),
     )
@@ -189,21 +191,20 @@ def _update_live_line(
     autoscale_y: bool = False,
     min_y_span: float = _RAW_MIN_Y_SPAN,
     y_padding_ratio: float = _RAW_Y_PADDING_RATIO,
+    x_limits: tuple[float, float] | None = None,
 ) -> None:
     values = np.asarray(channel_data, dtype=float)
     if clip_range is not None:
         values = np.clip(values, clip_range[0], clip_range[1])
 
-    if time is None:
-        x_values = np.arange(values.size, dtype=float)
-    else:
-        x_values = np.asarray(time, dtype=float)
-        if x_values.shape != values.shape:
-            raise ValueError("time and channel_data must have matching shapes for live updates.")
+    x_values = _coerce_x_values(values, time)
 
     line.set_xdata(x_values)
     line.set_ydata(values)
-    ax.set_xlim(*_compute_x_limits(x_values))
+    if x_limits is None:
+        ax.set_xlim(*_compute_x_limits(x_values))
+    else:
+        ax.set_xlim(*x_limits)
 
     if fixed_ylim is not None:
         ax.set_ylim(*fixed_ylim)
@@ -223,6 +224,32 @@ def _compute_x_limits(x_values: np.ndarray) -> tuple[float, float]:
 
     x_min = float(x_values[0])
     x_max = float(x_values[-1])
+    if x_min == x_max:
+        x_max = x_min + 1.0
+    return x_min, x_max
+
+
+def _coerce_x_values(
+    channel_data: Sequence[float] | np.ndarray,
+    time: Sequence[float] | np.ndarray | None,
+) -> np.ndarray:
+    values = np.asarray(channel_data, dtype=float)
+    if time is None:
+        return np.arange(values.size, dtype=float)
+
+    x_values = np.asarray(time, dtype=float)
+    if x_values.shape != values.shape:
+        raise ValueError("time and channel_data must have matching shapes for live updates.")
+    return x_values
+
+
+def _compute_shared_x_limits(*x_series: np.ndarray) -> tuple[float, float]:
+    non_empty_series = [series for series in x_series if series.size > 0]
+    if not non_empty_series:
+        return 0.0, 1.0
+
+    x_min = min(float(np.min(series)) for series in non_empty_series)
+    x_max = max(float(np.max(series)) for series in non_empty_series)
     if x_min == x_max:
         x_max = x_min + 1.0
     return x_min, x_max

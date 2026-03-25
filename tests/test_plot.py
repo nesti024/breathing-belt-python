@@ -55,6 +55,35 @@ def test_update_live_plots_keeps_raw_values_and_autoscales_axis() -> None:
         plt.close(fig)
 
 
+def test_update_live_plots_keeps_full_history_and_shared_x_axis() -> None:
+    fig, raw_ax, raw_line, normalized_ax, normalized_line, _ = setup_live_plots()
+
+    try:
+        raw_values = np.linspace(100.0, 399.0, 300, dtype=float)
+        raw_time = np.arange(300, dtype=float)
+        normalized_values = np.linspace(0.2, 0.8, 150, dtype=float)
+        normalized_time = np.arange(150, 300, dtype=float)
+
+        update_live_plots(
+            raw_values,
+            raw_time,
+            normalized_values,
+            normalized_time,
+            raw_ax=raw_ax,
+            raw_line=raw_line,
+            normalized_ax=normalized_ax,
+            normalized_line=normalized_line,
+        )
+
+        assert len(raw_line.get_xdata()) == 300
+        assert np.allclose(raw_line.get_xdata(), raw_time)
+        assert np.allclose(normalized_line.get_xdata(), normalized_time)
+        assert raw_ax.get_xlim() == (0.0, 299.0)
+        assert normalized_ax.get_xlim() == (0.0, 299.0)
+    finally:
+        plt.close(fig)
+
+
 def test_update_live_plots_adds_peak_and_trough_markers_to_raw_axis() -> None:
     fig, raw_ax, raw_line, normalized_ax, normalized_line, _ = setup_live_plots()
 

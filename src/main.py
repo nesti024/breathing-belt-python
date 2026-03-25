@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 from argparse import ArgumentParser
-from collections import deque
 from datetime import datetime
 from pathlib import Path
 import sys
@@ -102,15 +101,14 @@ def run_acquisition(config: AppConfig) -> None:
     normalized_ax = None
     normalized_line = None
     blit_manager = None
-    plot_window_length = config.display.plot_window_length
-    raw_sample_indices = deque(maxlen=plot_window_length)
-    raw_signal = deque(maxlen=plot_window_length)
-    normalized_sample_indices = deque(maxlen=plot_window_length)
-    normalized_signal = deque(maxlen=plot_window_length)
-    peak_sample_indices = deque(maxlen=plot_window_length)
-    peak_raw_values = deque(maxlen=plot_window_length)
-    trough_sample_indices = deque(maxlen=plot_window_length)
-    trough_raw_values = deque(maxlen=plot_window_length)
+    raw_sample_indices: list[int] = []
+    raw_signal: list[float] = []
+    normalized_sample_indices: list[int] = []
+    normalized_signal: list[float] = []
+    peak_sample_indices: list[int] = []
+    peak_raw_values: list[float] = []
+    trough_sample_indices: list[int] = []
+    trough_raw_values: list[float] = []
     acquisition_sample_index = 0
     pipeline_cfg = PipelineConfig(
         sampling_rate_hz=config.device.sampling_rate_hz,
