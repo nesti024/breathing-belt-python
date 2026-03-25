@@ -186,6 +186,7 @@ def test_session_writer_creates_expected_files_and_rows() -> None:
         assert stored_metadata["control_model"]["output_smoothing_enabled"] is True
         assert stored_metadata["control_model"]["output_smoothing_activity_window_ms"] == 500
         assert stored_metadata["control_model"]["output_smoothing_tau_active_s"] == 0.25
+        assert stored_metadata["control_model"]["output_smoothing_tau_extreme_s"] == 0.75
         assert stored_metadata["control_model"]["output_smoothing_tau_hold_s"] == 5.0
         assert (
             stored_metadata["control_model"]["output_smoothing_activity_low_ratio_per_sec"]
@@ -199,6 +200,7 @@ def test_session_writer_creates_expected_files_and_rows() -> None:
             stored_metadata["control_model"]["output_smoothing_activity_floor_per_sec"]
             == 0.01
         )
+        assert stored_metadata["control_model"]["output_smoothing_edge_margin_ratio"] == 0.1
         assert stored_metadata["lsl_stream"]["channel_count"] == 2
         assert stored_metadata["raw_qc_summary"]["event_counts"]["saturation"] == 1
     finally:

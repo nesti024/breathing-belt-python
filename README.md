@@ -59,7 +59,7 @@ Important config fields:
 - `filter.lp_*`: low-pass control filter parameters
 - `calibration.*`: processed-signal calibration settings, including control-map headroom via `padding_ratio`
 - `hold.*`: breath-hold freeze thresholds and the extrema-zone gate via `edge_margin_ratio`; set `hold.enabled = false` to disable hold detection for testing
-- `output_smoothing.*`: motion-adaptive damping for the emitted `0..1` control signal
+- `output_smoothing.*`: motion-adaptive damping for the emitted `0..1` control signal, including faster convergence near real extremes via `tau_extreme_s` and `edge_margin_ratio`
 - `extrema.*`: minimum interval and prominence thresholds for inhale/exhale events
 - `raw_qc.*`: raw-signal clipping, flatline, and baseline-shift thresholds
 - `output.root_dir`: parent directory for timestamped session exports
@@ -130,7 +130,7 @@ Runtime control:
 - maps the filtered signal through the padded control bounds so full breaths do not clip as early
 - optionally freezes the emitted `0..1` value during low-activity breath holds near the top or bottom `edge_margin_ratio` of the range
 - releases freeze immediately when motion resumes or the live control value drifts away from the frozen value
-- applies motion-adaptive smoothing to the final emitted `0..1` value: fast when breathing is active, slow when activity is low
+- applies motion-adaptive smoothing to the final emitted `0..1` value: fast when breathing is active, slow when activity is low, and faster again near the bottom/top `edge_margin_ratio` of the range so real extremes remain reachable
 - emits `1.0` on inhale peaks and `-1.0` on exhale troughs
 
 By default, the local `config.toml` keeps `hold.enabled = false` and relies on `output_smoothing` as the primary anti-drift mechanism for testing.

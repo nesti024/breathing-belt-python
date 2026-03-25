@@ -105,10 +105,12 @@ class OutputSmoothingConfig:
     enabled: bool = True
     activity_window_ms: int = 500
     tau_active_s: float = 0.25
+    tau_extreme_s: float = 0.75
     tau_hold_s: float = 5.0
     activity_low_ratio_per_sec: float = 0.10
     activity_high_ratio_per_sec: float = 0.50
     activity_floor_per_sec: float = 0.01
+    edge_margin_ratio: float = 0.10
 
 
 @dataclass(frozen=True)
@@ -405,6 +407,7 @@ def _load_output_smoothing_config(section: dict[str, Any]) -> OutputSmoothingCon
             section.get("activity_window_ms", defaults.activity_window_ms)
         ),
         tau_active_s=float(section.get("tau_active_s", defaults.tau_active_s)),
+        tau_extreme_s=float(section.get("tau_extreme_s", defaults.tau_extreme_s)),
         tau_hold_s=float(section.get("tau_hold_s", defaults.tau_hold_s)),
         activity_low_ratio_per_sec=float(
             section.get(
@@ -423,6 +426,9 @@ def _load_output_smoothing_config(section: dict[str, Any]) -> OutputSmoothingCon
                 "activity_floor_per_sec",
                 defaults.activity_floor_per_sec,
             )
+        ),
+        edge_margin_ratio=float(
+            section.get("edge_margin_ratio", defaults.edge_margin_ratio)
         ),
     )
 
@@ -508,10 +514,18 @@ def _validate_config(config: AppConfig) -> None:
         raise ValueError("output_smoothing.activity_window_ms must be positive.")
     if config.output_smoothing.tau_active_s <= 0.0:
         raise ValueError("output_smoothing.tau_active_s must be positive.")
+    if config.output_smoothing.tau_extreme_s <= 0.0:
+        raise ValueError("output_smoothing.tau_extreme_s must be positive.")
     if config.output_smoothing.tau_hold_s <= 0.0:
         raise ValueError("output_smoothing.tau_hold_s must be positive.")
-    if config.output_smoothing.tau_hold_s < config.output_smoothing.tau_active_s:
-        raise ValueError("output_smoothing.tau_hold_s must be >= output_smoothing.tau_active_s.")
+    if config.output_smoothing.tau_extreme_s < config.output_smoothing.tau_active_s:
+        raise ValueError(
+            "output_smoothing.tau_extreme_s must be >= output_smoothing.tau_active_s."
+        )
+    if config.output_smoothing.tau_hold_s < config.output_smoothing.tau_extreme_s:
+        raise ValueError(
+            "output_smoothing.tau_hold_s must be >= output_smoothing.tau_extreme_s."
+        )
     if config.output_smoothing.activity_low_ratio_per_sec <= 0.0:
         raise ValueError("output_smoothing.activity_low_ratio_per_sec must be positive.")
     if (
@@ -523,6 +537,8 @@ def _validate_config(config: AppConfig) -> None:
         )
     if config.output_smoothing.activity_floor_per_sec <= 0.0:
         raise ValueError("output_smoothing.activity_floor_per_sec must be positive.")
+    if not (0.0 < config.output_smoothing.edge_margin_ratio < 0.5):
+        raise ValueError("output_smoothing.edge_margin_ratio must be between 0 and 0.5.")
     if config.extrema.min_interval_ms <= 0:
         raise ValueError("extrema.min_interval_ms must be positive.")
     if config.extrema.prominence_ratio <= 0.0:

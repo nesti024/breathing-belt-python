@@ -69,10 +69,12 @@ def _make_pipeline_config(
             enabled=True,
             activity_window_ms=500,
             tau_active_s=0.25,
+            tau_extreme_s=0.75,
             tau_hold_s=5.0,
             activity_low_ratio_per_sec=0.10,
             activity_high_ratio_per_sec=0.50,
             activity_floor_per_sec=0.01,
+            edge_margin_ratio=0.10,
         ),
         extrema=extrema or ExtremaConfig(min_interval_ms=800, prominence_ratio=0.1),
         raw_qc=raw_qc or RawQCConfig(),
@@ -331,6 +333,70 @@ def test_pipeline_output_smoothing_reduces_low_activity_drift_without_steps() ->
     assert np.max(np.abs(np.diff(normalized[drift_slice]))) < 0.01
 
 
+def test_pipeline_output_smoothing_reaches_lower_edge_during_sustained_trough() -> None:
+    cfg = _make_pipeline_config(
+        calibration_duration_s=5.0,
+        hold=HoldConfig(
+            enabled=False,
+            activity_window_ms=100,
+            ratio_per_sec_enter=0.2,
+            ratio_per_sec_exit=0.4,
+            floor_per_sec=0.01,
+            edge_margin_ratio=0.20,
+        ),
+    )
+    calibration_values = _make_breathing_values(cfg.calibration_target_samples, amplitude=20.0)
+    runtime_values = np.concatenate(
+        [
+            np.linspace(512.0, 300.0, 200, dtype=float),
+            np.full(100, 300.0, dtype=float),
+        ]
+    )
+    samples, state = _replay(np.concatenate([calibration_values, runtime_values]), cfg)
+
+    runtime_samples = [sample for sample in samples if sample.stage == "runtime"]
+    normalized = np.array(
+        [sample.normalized_value for sample in runtime_samples if sample.normalized_value is not None],
+        dtype=float,
+    )
+    candidate = _mapped_candidate_levels(samples, state)
+
+    assert np.allclose(candidate[-100:], 0.0)
+    assert float(normalized[-1]) < 0.01
+
+
+def test_pipeline_output_smoothing_reaches_upper_edge_during_sustained_peak() -> None:
+    cfg = _make_pipeline_config(
+        calibration_duration_s=5.0,
+        hold=HoldConfig(
+            enabled=False,
+            activity_window_ms=100,
+            ratio_per_sec_enter=0.2,
+            ratio_per_sec_exit=0.4,
+            floor_per_sec=0.01,
+            edge_margin_ratio=0.20,
+        ),
+    )
+    calibration_values = _make_breathing_values(cfg.calibration_target_samples, amplitude=20.0)
+    runtime_values = np.concatenate(
+        [
+            np.linspace(512.0, 700.0, 200, dtype=float),
+            np.full(100, 700.0, dtype=float),
+        ]
+    )
+    samples, state = _replay(np.concatenate([calibration_values, runtime_values]), cfg)
+
+    runtime_samples = [sample for sample in samples if sample.stage == "runtime"]
+    normalized = np.array(
+        [sample.normalized_value for sample in runtime_samples if sample.normalized_value is not None],
+        dtype=float,
+    )
+    candidate = _mapped_candidate_levels(samples, state)
+
+    assert np.allclose(candidate[-100:], 1.0)
+    assert float(normalized[-1]) > 0.99
+
+
 def test_pipeline_output_smoothing_preserves_active_breathing_responsiveness() -> None:
     cfg = _make_pipeline_config(
         calibration_duration_s=5.0,
@@ -359,6 +425,72 @@ def test_pipeline_output_smoothing_preserves_active_breathing_responsiveness() -
     assert (np.max(normalized) - np.min(normalized)) > 0.8 * (
         np.max(candidate) - np.min(candidate)
     )
+
+
+def test_pipeline_edge_aware_smoothing_is_inactive_in_midrange() -> None:
+    base_hold = HoldConfig(
+        enabled=False,
+        activity_window_ms=100,
+        ratio_per_sec_enter=0.2,
+        ratio_per_sec_exit=0.4,
+        floor_per_sec=0.01,
+        edge_margin_ratio=0.20,
+    )
+    cfg_edge_aware = _make_pipeline_config(
+        calibration_duration_s=5.0,
+        hold=base_hold,
+        output_smoothing=OutputSmoothingConfig(
+            enabled=True,
+            activity_window_ms=500,
+            tau_active_s=0.25,
+            tau_extreme_s=0.75,
+            tau_hold_s=5.0,
+            activity_low_ratio_per_sec=0.10,
+            activity_high_ratio_per_sec=0.50,
+            activity_floor_per_sec=0.01,
+            edge_margin_ratio=0.10,
+        ),
+    )
+    cfg_edge_disabled = _make_pipeline_config(
+        calibration_duration_s=5.0,
+        hold=base_hold,
+        output_smoothing=OutputSmoothingConfig(
+            enabled=True,
+            activity_window_ms=500,
+            tau_active_s=0.25,
+            tau_extreme_s=5.0,
+            tau_hold_s=5.0,
+            activity_low_ratio_per_sec=0.10,
+            activity_high_ratio_per_sec=0.50,
+            activity_floor_per_sec=0.01,
+            edge_margin_ratio=0.10,
+        ),
+    )
+    calibration_values = _make_breathing_values(cfg_edge_aware.calibration_target_samples, amplitude=25.0)
+    runtime_values = _make_breathing_values(800, amplitude=8.0)
+
+    edge_samples, edge_state = _replay(
+        np.concatenate([calibration_values, runtime_values]),
+        cfg_edge_aware,
+    )
+    disabled_samples, _ = _replay(
+        np.concatenate([calibration_values, runtime_values]),
+        cfg_edge_disabled,
+    )
+
+    edge_normalized = np.array(
+        [sample.normalized_value for sample in edge_samples if sample.stage == "runtime"],
+        dtype=float,
+    )
+    disabled_normalized = np.array(
+        [sample.normalized_value for sample in disabled_samples if sample.stage == "runtime"],
+        dtype=float,
+    )
+    candidate = _mapped_candidate_levels(edge_samples, edge_state)
+
+    assert np.min(candidate) > cfg_edge_aware.output_smoothing.edge_margin_ratio
+    assert np.max(candidate) < 1.0 - cfg_edge_aware.output_smoothing.edge_margin_ratio
+    assert np.allclose(edge_normalized, disabled_normalized)
 
 
 def test_pipeline_output_smoothing_can_be_disabled() -> None:

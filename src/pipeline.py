@@ -392,8 +392,9 @@ def _normalize_runtime_sample(
 
     return _smooth_output_level(
         post_hold_level,
-        state,
-        cfg,
+        state=state,
+        cfg=cfg,
+        candidate_level=normalized_candidate,
         amplitude=amplitude,
     )
 
@@ -413,9 +414,10 @@ def _map_control_level(
 
 def _smooth_output_level(
     target_level: float,
+    *,
+    candidate_level: float,
     state: PipelineState,
     cfg: PipelineConfig,
-    *,
     amplitude: float,
 ) -> float:
     if state.hold_mode_active and cfg.hold.enabled:
@@ -446,11 +448,20 @@ def _smooth_output_level(
 
     activity_ratio = (activity_value - low_threshold) / (high_threshold - low_threshold)
     activity_ratio = float(min(1.0, max(0.0, activity_ratio)))
-    tau_s = (
+    base_tau_s = (
         cfg.output_smoothing.tau_hold_s
         + activity_ratio
         * (cfg.output_smoothing.tau_active_s - cfg.output_smoothing.tau_hold_s)
     )
+    distance_to_edge = min(float(candidate_level), 1.0 - float(candidate_level))
+    if distance_to_edge >= cfg.output_smoothing.edge_margin_ratio:
+        edge_factor = 0.0
+    else:
+        edge_factor = 1.0 - (
+            distance_to_edge / cfg.output_smoothing.edge_margin_ratio
+        )
+    extreme_tau_s = min(base_tau_s, cfg.output_smoothing.tau_extreme_s)
+    tau_s = base_tau_s + edge_factor * (extreme_tau_s - base_tau_s)
     alpha = 1.0 - math.exp(-1.0 / (cfg.sampling_rate_hz * tau_s))
 
     state.emitted_normalized_value = (
