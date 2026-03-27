@@ -33,17 +33,17 @@ lp_order = 2
 
 [movement]
 # Realtime movement-proxy mode uses a slow causal high-pass for drift removal
-# followed by a light causal low-pass.
+# followed by a light causal low-pass. During very low activity, the visible
+# drift-removal response can optionally be slowed without fully freezing the trace.
 hp_cutoff_hz = 0.03
 hp_order = 1
 lp_cutoff_hz = 1.5
 lp_order = 2
-
-[artifact]
-# Artifact suppression settings are retained for backward compatibility and are
-# not used by the fixed-calibration VR control path.
-spike_threshold = 2.5
-artifact_window = 10
+low_activity_slowdown_enabled = false
+low_activity_window_ms = 800
+low_activity_ratio_per_sec = 0.05
+low_activity_floor_per_sec = 0.01
+low_activity_drift_scale = 0.15
 
 [calibration]
 duration_s = 15.0
@@ -55,7 +55,9 @@ padding_ratio = 0.20
 
 [adaptation]
 # Adaptive live mode uses these settings to update center and amplitude during
-# runtime. The fixed-calibration control path still ignores them.
+# runtime. The fixed-calibration control path still ignores them. Low-activity
+# gating pauses range adaptation during quiet plateaus so long holds do not
+# recentre as quickly.
 center_enabled = true
 amplitude_enabled = true
 center_tau_s = 600.0
@@ -63,6 +65,10 @@ amplitude_tau_s = 120.0
 startup_duration_s = 60.0
 startup_center_tau_s = 25.0
 startup_amplitude_tau_s = 25.0
+low_activity_gating_enabled = true
+low_activity_window_ms = 800
+low_activity_ratio_per_sec = 0.05
+low_activity_floor_per_sec = 0.01
 
 [hold]
 enabled = true

@@ -16,7 +16,7 @@ This repository provides:
 - startup selection between legacy control, movement-proxy, and adaptive live-control modes
 - percentile-based startup calibration
 - fixed-calibration mapping with padded control headroom into a continuous `0..1` breath level in control mode
-- centered movement-proxy output with causal drift removal and light smoothing in movement mode
+- centered movement-proxy output with causal drift removal and light smoothing in movement-proxy mode
 - adaptive center/amplitude normalization for rhythm-flexible live control
 - inhale-peak and exhale-trough event detection in all live modes
 - breath-hold output freezing near inhale/exhale extremes to minimize sphere drift during holds in control mode
@@ -63,9 +63,9 @@ Important config fields:
 - `device.processed_sensor_column`: device-row column used for the normalized signal
 - `device.invert_signal`: flips the control-signal polarity when inhale/exhale direction is reversed
 - `filter.lp_*`: low-pass parameters for legacy control mode and adaptive live mode
-- `movement.*`: high-pass and low-pass parameters for realtime movement-proxy mode
+- `movement.*`: high-pass and low-pass parameters for realtime movement-proxy mode, with optional low-activity drift slowdown
 - `calibration.*`: processed-signal calibration settings, including control-map headroom via `padding_ratio`
-- `adaptation.*`: runtime center/amplitude update speeds for adaptive live mode
+- `adaptation.*`: runtime center/amplitude update speeds and low-activity gating for adaptive live mode
 - `hold.*`: breath-hold freeze thresholds and the extrema-zone gate via `edge_margin_ratio`; set `hold.enabled = false` to disable hold detection for testing
 - `output_smoothing.*`: motion-adaptive damping for the emitted `0..1` control signal, including faster convergence near real extremes via `tau_extreme_s` and `edge_margin_ratio`
 - `extrema.*`: minimum interval and prominence thresholds for inhale/exhale events
@@ -132,7 +132,7 @@ Mode `1` (`Legacy control`):
 
 Mode `2` (`Realtime movement proxy`):
 
-`raw selected channel -> optional polarity inversion -> causal high-pass drift removal -> causal low-pass smoothing -> startup calibration -> centered movement output`
+`raw selected channel -> optional polarity inversion -> causal high-pass drift removal -> causal low-pass smoothing -> startup calibration -> centered movement-proxy output`
 
 Mode `3` (`Adaptive live control`):
 
@@ -153,14 +153,16 @@ Runtime control mode:
 - applies motion-adaptive smoothing to the final emitted `0..1` value: fast when breathing is active, slow when activity is low, and faster again near the bottom/top `edge_margin_ratio` of the range so real extremes remain reachable
 - emits `1.0` on inhale peaks and `-1.0` on exhale troughs
 
-Runtime movement mode:
+Runtime movement-proxy mode:
 - outputs centered filtered sensor units rather than a normalized `0..1` control level
 - does not apply padded control mapping, hold freezing, or output smoothing
+- can optionally slow its visible recentering during very low activity through `movement.low_activity_*`
 - still emits `1.0` on inhale peaks and `-1.0` on exhale troughs
 
 Runtime adaptive mode:
 - emits a bounded `0..1` control level while updating center and amplitude online
 - uses `adaptation.startup_*` time constants during the startup adaptation window and `adaptation.center_tau_s` / `adaptation.amplitude_tau_s` afterward
+- can pause center/amplitude adaptation during very low activity through `adaptation.low_activity_*`
 - does not apply hold freezing or motion-adaptive output smoothing
 - also exports a centered `movement_value` trace derived from the current adaptive center
 - still emits `1.0` on inhale peaks and `-1.0` on exhale troughs
@@ -171,6 +173,7 @@ LSL:
 - mode `1` publishes two float32 channels by default: `breath_level` and `event_code`
 - mode `2` publishes a separate stream identity with `movement_value` and `event_code`
 - mode `3` publishes a separate stream identity with `breath_level` and `event_code`
+- explicit per-sample LSL timestamps are derived from the acquisition sample index and nominal sampling rate
 - `event_code` is `0.0` during normal samples, `1.0` for inhale peaks, and `-1.0` for exhale troughs
 
 ## Raw Quality Control
@@ -190,7 +193,7 @@ QC policy is advisory:
 - The normalized control output, adaptive live output, and movement-proxy output are all filtered proxies, not validated respiratory-volume estimates.
 - Belt placement, posture, slack, and motion can materially affect the signal.
 - The method currently processes one configured sensor column for normalization, even if multiple channels are acquired and exported.
-- The deprecated `filter.hp_*` and `artifact.*` settings remain loadable for compatibility and are not used by the fixed-calibration VR control path.
+- The deprecated `filter.hp_*` settings remain loadable for compatibility and are not used by the fixed-calibration VR control path.
 - The code is intended for reproducible research workflows, not medical use.
 
 ## Tests

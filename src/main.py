@@ -178,6 +178,7 @@ def run_acquisition(config: AppConfig) -> None:
     trough_sample_indices: list[int] = []
     trough_raw_values: list[float] = []
     acquisition_sample_index = 0
+    lsl_reference_time: float | None = None
     selected_mode_number, processing_mode = prompt_processing_mode()
     print(
         "Selected mode "
@@ -189,7 +190,6 @@ def run_acquisition(config: AppConfig) -> None:
         processed_sensor_column=config.device.processed_sensor_column,
         invert_signal=config.device.invert_signal,
         filter=config.filter,
-        artifact=config.artifact,
         calibration=config.calibration,
         adaptation=config.adaptation,
         hold=config.hold,
@@ -252,6 +252,8 @@ def run_acquisition(config: AppConfig) -> None:
         )
         print("Breathe normally and include full inhale/exhale range.")
         print("Press 'c' to stop acquisition.")
+        if lsl_sender is not None:
+            lsl_reference_time = lsl_sender.now()
 
         while not keyboard.is_pressed("c"):
             data = belt.get_all()
@@ -292,9 +294,23 @@ def run_acquisition(config: AppConfig) -> None:
                             trough_sample_indices.append(acquisition_sample_index)
                             trough_raw_values.append(sample.selected_sensor_raw)
                         if lsl_sender is not None:
-                            lsl_sender.send([runtime_value, sample.extrema_event_code])
+                            sample_timestamp = (
+                                None
+                                if lsl_reference_time is None
+                                else (
+                                    lsl_reference_time
+                                    + (
+                                        acquisition_sample_index
+                                        / float(config.device.sampling_rate_hz)
+                                    )
+                                )
+                            )
+                            lsl_sender.send(
+                                [runtime_value, sample.extrema_event_code],
+                                timestamp=sample_timestamp,
+                            )
                         if processing_mode == "movement":
-                            print(f"Movement: {runtime_value:.4f}")
+                            print(f"Movement proxy: {runtime_value:.4f}")
                         elif processing_mode == "adaptive":
                             print(f"Adaptive normalized: {runtime_value:.4f}")
                         else:

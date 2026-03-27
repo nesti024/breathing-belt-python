@@ -49,15 +49,18 @@ class _FakeStreamOutlet:
     def __init__(self, info: _FakeStreamInfo) -> None:
         self.info = info
         self.samples: list[list[float]] = []
+        self.timestamps: list[float | None] = []
 
-    def push_sample(self, sample: list[float]) -> None:
+    def push_sample(self, sample: list[float], timestamp: float | None = None) -> None:
         self.samples.append(sample)
+        self.timestamps.append(timestamp)
 
 
 def _reload_lsl_module(monkeypatch):
     fake_pylsl = types.SimpleNamespace(
         StreamInfo=_FakeStreamInfo,
         StreamOutlet=_FakeStreamOutlet,
+        local_clock=lambda: 123.456,
     )
     monkeypatch.setitem(sys.modules, "pylsl", fake_pylsl)
     sys.modules.pop("src.lsl_out", None)
@@ -77,6 +80,7 @@ def test_lsl_sender_publishes_two_channel_samples_with_labels(monkeypatch) -> No
     channels_node = sender.info.desc().children[0]
     labels = [child.values["label"] for child in channels_node.children]
     assert labels == ["breath_level", "event_code"]
+    assert sender.outlet.timestamps == [None]
 
 
 def test_lsl_sender_supports_movement_stream_identity(monkeypatch) -> None:
@@ -113,3 +117,14 @@ def test_lsl_sender_supports_adaptive_stream_identity(monkeypatch) -> None:
     assert sender.info.type == "BreathingAdaptive"
     assert sender.info.source_id == "breathingbelt001_adaptive"
     assert sender.outlet.samples == [[0.65, 1.0]]
+
+
+def test_lsl_sender_supports_explicit_timestamps(monkeypatch) -> None:
+    lsl_out = _reload_lsl_module(monkeypatch)
+    sender = lsl_out.LSLBreathingSender()
+
+    assert sender.now() == 123.456
+    sender.send([0.5, 0.0], timestamp=321.0)
+
+    assert sender.outlet.samples == [[0.5, 0.0]]
+    assert sender.outlet.timestamps == [321.0]

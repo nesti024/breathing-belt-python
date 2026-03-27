@@ -204,6 +204,10 @@ def build_session_metadata(
             "startup_duration_s": config.adaptation.startup_duration_s,
             "startup_center_tau_s": config.adaptation.startup_center_tau_s,
             "startup_amplitude_tau_s": config.adaptation.startup_amplitude_tau_s,
+            "low_activity_gating_enabled": config.adaptation.low_activity_gating_enabled,
+            "low_activity_window_ms": config.adaptation.low_activity_window_ms,
+            "low_activity_ratio_per_sec": config.adaptation.low_activity_ratio_per_sec,
+            "low_activity_floor_per_sec": config.adaptation.low_activity_floor_per_sec,
         },
         "control_model": {
             "active": control_active,
@@ -239,6 +243,11 @@ def build_session_metadata(
             "hp_order": config.movement.hp_order,
             "lp_cutoff_hz": config.movement.lp_cutoff_hz,
             "lp_order": config.movement.lp_order,
+            "low_activity_slowdown_enabled": config.movement.low_activity_slowdown_enabled,
+            "low_activity_window_ms": config.movement.low_activity_window_ms,
+            "low_activity_ratio_per_sec": config.movement.low_activity_ratio_per_sec,
+            "low_activity_floor_per_sec": config.movement.low_activity_floor_per_sec,
+            "low_activity_drift_scale": config.movement.low_activity_drift_scale,
             "calibration_center": (
                 None if calibration_result is None or not movement_active else float(calibration_result.center)
             ),
@@ -266,6 +275,10 @@ def build_session_metadata(
             "startup_duration_s": config.adaptation.startup_duration_s,
             "startup_center_tau_s": config.adaptation.startup_center_tau_s,
             "startup_amplitude_tau_s": config.adaptation.startup_amplitude_tau_s,
+            "low_activity_gating_enabled": config.adaptation.low_activity_gating_enabled,
+            "low_activity_window_ms": config.adaptation.low_activity_window_ms,
+            "low_activity_ratio_per_sec": config.adaptation.low_activity_ratio_per_sec,
+            "low_activity_floor_per_sec": config.adaptation.low_activity_floor_per_sec,
             "initial_center": (
                 None if calibration_result is None or not adaptive_mode_active else float(calibration_result.center)
             ),

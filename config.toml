@@ -36,14 +36,7 @@ hp_cutoff_hz = 0.002
 hp_order = 1
 lp_cutoff_hz = 0.8
 lp_order = 2
-
-
-
-[artifact]
-# Artifact suppression settings are retained for backward compatibility and are
-# not used by the fixed-calibration VR control path.
-spike_threshold = 2.5
-artifact_window = 10
+low_activity_slowdown_enabled = false
 
 [calibration]
 duration_s = 15.0

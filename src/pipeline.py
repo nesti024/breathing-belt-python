@@ -27,7 +27,6 @@ from .preprocessing import (
 from .quality import RawQCEvent, RawQCState, create_raw_qc_state, update_raw_qc
 from .settings import (
     AdaptationSettings,
-    ArtifactConfig,
     CalibrationSettings,
     ExtremaConfig,
     FilterConfig,
@@ -50,7 +49,6 @@ class PipelineConfig:
     processed_sensor_column: int
     invert_signal: bool
     filter: FilterConfig
-    artifact: ArtifactConfig
     calibration: CalibrationSettings
     adaptation: AdaptationSettings
     hold: HoldConfig
@@ -116,6 +114,30 @@ class PipelineConfig:
         )
 
     @property
+    def movement_low_activity_window_samples(self) -> int:
+        return max(
+            3,
+            int(
+                round(
+                    (self.movement.low_activity_window_ms / 1000.0)
+                    * self.sampling_rate_hz
+                )
+            ),
+        )
+
+    @property
+    def adaptation_low_activity_window_samples(self) -> int:
+        return max(
+            3,
+            int(
+                round(
+                    (self.adaptation.low_activity_window_ms / 1000.0)
+                    * self.sampling_rate_hz
+                )
+            ),
+        )
+
+    @property
     def extrema_min_interval_samples(self) -> int:
         return max(1, int(round((self.extrema.min_interval_ms / 1000.0) * self.sampling_rate_hz)))
 
@@ -147,9 +169,10 @@ class PipelineSample:
 class PipelineState:
     """Mutable state for the live-processing pipeline."""
 
-    recent_raw_deltas: deque[float]
     recent_abs_velocity: deque[float]
     recent_output_abs_velocity: deque[float]
+    recent_movement_abs_velocity: deque[float]
+    recent_adaptive_abs_velocity: deque[float]
     qc_state: RawQCState
     filter_initialized: bool = False
     sos_hp: np.ndarray | None = None
@@ -158,9 +181,12 @@ class PipelineState:
     zi_lp: np.ndarray | None = None
     previous_filtered_value: float | None = None
     previous_cleaned_value: float | None = None
+    previous_movement_activity_value: float | None = None
+    previous_adaptive_value: float | None = None
     hold_mode_active: bool = False
     frozen_normalized_value: float | None = None
     emitted_normalized_value: float | None = None
+    slowed_movement_value: float | None = None
     calibration_samples: list[float] = field(default_factory=list)
     calibration_result: CalibrationResult | None = None
     adaptive_state: AdaptiveRangeState | None = None
@@ -182,9 +208,10 @@ def create_pipeline_state(cfg: PipelineConfig) -> PipelineState:
     """Create a pipeline state object with config-dependent buffer sizes."""
 
     return PipelineState(
-        recent_raw_deltas=deque(maxlen=max(cfg.artifact.artifact_window, 3)),
         recent_abs_velocity=deque(maxlen=cfg.hold_activity_window_samples),
         recent_output_abs_velocity=deque(maxlen=cfg.output_smoothing_activity_window_samples),
+        recent_movement_abs_velocity=deque(maxlen=cfg.movement_low_activity_window_samples),
+        recent_adaptive_abs_velocity=deque(maxlen=cfg.adaptation_low_activity_window_samples),
         qc_state=create_raw_qc_state(),
     )
 
@@ -203,7 +230,7 @@ def process_device_row(
     messages: list[str] = []
 
     filtered_value = _filter_sample(raw_sensor_value, state, cfg)
-    cleaned_value, is_artifact = _suppress_reversal(filtered_value, state, cfg)
+    cleaned_value, is_artifact = _suppress_reversal(filtered_value)
     qc_events, state.qc_state = update_raw_qc(
         raw_value=raw_sensor_value,
         stage=stage,
@@ -269,9 +296,9 @@ def process_device_row(
             if cfg.processing_mode == "movement":
                 messages.extend(
                     [
-                        "Movement calibration complete.",
+                        "Movement-proxy calibration complete.",
                         (
-                            "Movement reference: "
+                            "Movement-proxy reference: "
                             f"center={state.calibration_result.center:.6f}, "
                             f"reference_amplitude={state.calibration_result.amplitude:.6f}, "
                             f"percentile_lo={state.calibration_result.global_min:.6f}, "
@@ -308,12 +335,16 @@ def process_device_row(
                 )
             state.recent_abs_velocity.clear()
             state.recent_output_abs_velocity.clear()
-            state.recent_raw_deltas.clear()
+            state.recent_movement_abs_velocity.clear()
+            state.recent_adaptive_abs_velocity.clear()
             state.previous_filtered_value = None
             state.previous_cleaned_value = None
+            state.previous_movement_activity_value = None
+            state.previous_adaptive_value = None
             state.hold_mode_active = False
             state.frozen_normalized_value = None
             state.emitted_normalized_value = None
+            state.slowed_movement_value = None
             state.runtime_processed_samples = 0
             state.startup_mode_active = False
             state.previous_delta_sign = 0
@@ -412,7 +443,7 @@ def _filter_sample(raw_sensor_value: float, state: PipelineState, cfg: PipelineC
 
     if cfg.processing_mode == "movement":
         if state.sos_hp is None or state.zi_hp is None:
-            raise RuntimeError("High-pass filter state must be initialized for movement mode.")
+            raise RuntimeError("High-pass filter state must be initialized for movement-proxy mode.")
         high_passed_value, state.zi_hp = high_pass_filter_sample(
             control_input,
             state.sos_hp,
@@ -422,6 +453,12 @@ def _filter_sample(raw_sensor_value: float, state: PipelineState, cfg: PipelineC
             float(high_passed_value),
             state.sos_lp,
             state.zi_lp,
+        )
+        low_passed_value = _apply_movement_low_activity_slowdown(
+            control_input=float(control_input),
+            filtered_value=float(low_passed_value),
+            state=state,
+            cfg=cfg,
         )
     else:
         low_passed_value, state.zi_lp = low_pass_filter_sample(
@@ -434,11 +471,7 @@ def _filter_sample(raw_sensor_value: float, state: PipelineState, cfg: PipelineC
 
 def _suppress_reversal(
     filtered_value: float,
-    state: PipelineState,
-    cfg: PipelineConfig,
 ) -> tuple[float, bool]:
-    del state
-    del cfg
     return float(filtered_value), False
 
 
@@ -523,7 +556,7 @@ def _compute_runtime_movement_value(
     state: PipelineState,
 ) -> float:
     if state.calibration_result is None:
-        raise RuntimeError("Calibration state must be initialized before runtime movement output.")
+        raise RuntimeError("Calibration state must be initialized before runtime movement-proxy output.")
     return float(cleaned_value - state.calibration_result.center)
 
 
@@ -539,18 +572,116 @@ def _normalize_runtime_adaptive_sample(
 
     current_state = state.adaptive_state
     movement_value = float(cleaned_value - current_state.center)
+    abs_velocity = _append_abs_velocity(
+        recent_abs_velocity=state.recent_adaptive_abs_velocity,
+        current_value=float(cleaned_value),
+        previous_value=state.previous_adaptive_value,
+        fs_hz=cfg.sampling_rate_hz,
+    )
+    state.previous_adaptive_value = float(cleaned_value)
     in_startup = state.runtime_processed_samples < cfg.startup_target_samples
     state.startup_mode_active = in_startup
     adaptive_cfg = cfg.adaptive_cfg_startup if in_startup else cfg.adaptive_cfg_runtime
+    low_activity = (
+        cfg.adaptation.low_activity_gating_enabled
+        and _is_low_activity(
+            recent_abs_velocity=state.recent_adaptive_abs_velocity,
+            abs_velocity=abs_velocity,
+            amplitude=max(current_state.amplitude, cfg.calibration.amplitude_floor),
+            ratio_per_sec=cfg.adaptation.low_activity_ratio_per_sec,
+            floor_per_sec=cfg.adaptation.low_activity_floor_per_sec,
+        )
+    )
+    allow_center_update = cfg.adaptation.center_enabled and not low_activity
+    allow_amplitude_update = cfg.adaptation.amplitude_enabled and not low_activity
     normalized_value, state.adaptive_state = update_adaptive_range(
         x=float(cleaned_value),
         state=current_state,
         cfg=adaptive_cfg,
-        allow_update=cfg.adaptation.center_enabled or cfg.adaptation.amplitude_enabled,
-        allow_center_update=cfg.adaptation.center_enabled,
-        allow_amplitude_update=cfg.adaptation.amplitude_enabled,
+        allow_update=allow_center_update or allow_amplitude_update,
+        allow_center_update=allow_center_update,
+        allow_amplitude_update=allow_amplitude_update,
     )
     return float(normalized_value), movement_value
+
+
+def _apply_movement_low_activity_slowdown(
+    *,
+    control_input: float,
+    filtered_value: float,
+    state: PipelineState,
+    cfg: PipelineConfig,
+) -> float:
+    if state.stage != "runtime":
+        state.slowed_movement_value = float(filtered_value)
+        return float(filtered_value)
+
+    abs_velocity = _append_abs_velocity(
+        recent_abs_velocity=state.recent_movement_abs_velocity,
+        current_value=float(control_input),
+        previous_value=state.previous_movement_activity_value,
+        fs_hz=cfg.sampling_rate_hz,
+    )
+    state.previous_movement_activity_value = float(control_input)
+
+    if state.slowed_movement_value is None:
+        state.slowed_movement_value = float(filtered_value)
+        return float(filtered_value)
+
+    low_activity = (
+        cfg.movement.low_activity_slowdown_enabled
+        and state.calibration_result is not None
+        and _is_low_activity(
+            recent_abs_velocity=state.recent_movement_abs_velocity,
+            abs_velocity=abs_velocity,
+            amplitude=max(state.calibration_result.amplitude, cfg.calibration.amplitude_floor),
+            ratio_per_sec=cfg.movement.low_activity_ratio_per_sec,
+            floor_per_sec=cfg.movement.low_activity_floor_per_sec,
+        )
+    )
+    recentering_toward_zero = (
+        abs(float(filtered_value)) < abs(state.slowed_movement_value)
+        and float(filtered_value) * state.slowed_movement_value >= 0.0
+    )
+    drift_scale = (
+        cfg.movement.low_activity_drift_scale
+        if low_activity and recentering_toward_zero
+        else 1.0
+    )
+    state.slowed_movement_value = state.slowed_movement_value + drift_scale * (
+        float(filtered_value) - state.slowed_movement_value
+    )
+    return float(state.slowed_movement_value)
+
+
+def _append_abs_velocity(
+    *,
+    recent_abs_velocity: deque[float],
+    current_value: float,
+    previous_value: float | None,
+    fs_hz: int,
+) -> float:
+    if previous_value is None:
+        abs_velocity = 0.0
+    else:
+        abs_velocity = abs(float(current_value) - float(previous_value)) * fs_hz
+    recent_abs_velocity.append(abs_velocity)
+    return float(abs_velocity)
+
+
+def _is_low_activity(
+    *,
+    recent_abs_velocity: deque[float],
+    abs_velocity: float,
+    amplitude: float,
+    ratio_per_sec: float,
+    floor_per_sec: float,
+) -> bool:
+    if len(recent_abs_velocity) < recent_abs_velocity.maxlen:
+        return False
+    activity_threshold = max(float(floor_per_sec), float(amplitude) * float(ratio_per_sec))
+    activity_value = float(np.mean(recent_abs_velocity))
+    return activity_value < activity_threshold and float(abs_velocity) < activity_threshold
 
 
 def _map_control_level(
@@ -715,7 +846,7 @@ def _run_movement_calibration(
 ) -> CalibrationResult:
     samples = np.asarray(calibration_samples, dtype=float).reshape(-1)
     if samples.size == 0:
-        raise ValueError("Movement calibration requires at least one sample.")
+        raise ValueError("Movement-proxy calibration requires at least one sample.")
 
     sorted_samples = np.sort(samples)
     n_samples = int(sorted_samples.size)

@@ -62,14 +62,11 @@ class MovementConfig:
     hp_order: int = 1
     lp_cutoff_hz: float = 1.5
     lp_order: int = 2
-
-
-@dataclass(frozen=True)
-class ArtifactConfig:
-    """Reversal-only artifact suppression parameters."""
-
-    spike_threshold: float = 2.5
-    artifact_window: int = 10
+    low_activity_slowdown_enabled: bool = False
+    low_activity_window_ms: int = 800
+    low_activity_ratio_per_sec: float = 0.05
+    low_activity_floor_per_sec: float = 0.01
+    low_activity_drift_scale: float = 0.15
 
 
 @dataclass(frozen=True)
@@ -94,6 +91,10 @@ class AdaptationSettings:
     startup_duration_s: float = 60.0
     startup_center_tau_s: float = 25.0
     startup_amplitude_tau_s: float = 25.0
+    low_activity_gating_enabled: bool = True
+    low_activity_window_ms: int = 800
+    low_activity_ratio_per_sec: float = 0.05
+    low_activity_floor_per_sec: float = 0.01
 
 
 @dataclass(frozen=True)
@@ -163,7 +164,6 @@ class AppConfig:
     lsl: LSLConfig
     filter: FilterConfig
     movement: MovementConfig
-    artifact: ArtifactConfig
     calibration: CalibrationSettings
     adaptation: AdaptationSettings
     hold: HoldConfig
@@ -182,7 +182,6 @@ def default_config() -> AppConfig:
         lsl=LSLConfig(),
         filter=FilterConfig(),
         movement=MovementConfig(),
-        artifact=ArtifactConfig(),
         calibration=CalibrationSettings(),
         adaptation=AdaptationSettings(),
         hold=HoldConfig(),
@@ -212,7 +211,6 @@ def load_config(path: str | Path) -> AppConfig:
         lsl=_load_lsl_config(_section(raw_config, "lsl")),
         filter=_load_filter_config(_section(raw_config, "filter")),
         movement=_load_movement_config(_section(raw_config, "movement")),
-        artifact=_load_artifact_config(_section(raw_config, "artifact")),
         calibration=_load_calibration_settings(_section(raw_config, "calibration")),
         adaptation=_load_adaptation_settings(_section(raw_config, "adaptation")),
         hold=_load_hold_config(_section(raw_config, "hold")),
@@ -354,17 +352,37 @@ def _load_movement_config(section: dict[str, Any]) -> MovementConfig:
         hp_order=int(section.get("hp_order", defaults.hp_order)),
         lp_cutoff_hz=float(section.get("lp_cutoff_hz", defaults.lp_cutoff_hz)),
         lp_order=int(section.get("lp_order", defaults.lp_order)),
+        low_activity_slowdown_enabled=bool(
+            section.get(
+                "low_activity_slowdown_enabled",
+                defaults.low_activity_slowdown_enabled,
+            )
+        ),
+        low_activity_window_ms=int(
+            section.get(
+                "low_activity_window_ms",
+                defaults.low_activity_window_ms,
+            )
+        ),
+        low_activity_ratio_per_sec=float(
+            section.get(
+                "low_activity_ratio_per_sec",
+                defaults.low_activity_ratio_per_sec,
+            )
+        ),
+        low_activity_floor_per_sec=float(
+            section.get(
+                "low_activity_floor_per_sec",
+                defaults.low_activity_floor_per_sec,
+            )
+        ),
+        low_activity_drift_scale=float(
+            section.get(
+                "low_activity_drift_scale",
+                defaults.low_activity_drift_scale,
+            )
+        ),
     )
-
-
-def _load_artifact_config(section: dict[str, Any]) -> ArtifactConfig:
-    defaults = ArtifactConfig()
-    return ArtifactConfig(
-        spike_threshold=float(section.get("spike_threshold", defaults.spike_threshold)),
-        artifact_window=int(section.get("artifact_window", defaults.artifact_window)),
-    )
-
-
 def _load_calibration_settings(section: dict[str, Any]) -> CalibrationSettings:
     defaults = CalibrationSettings()
     return CalibrationSettings(
@@ -397,6 +415,30 @@ def _load_adaptation_settings(section: dict[str, Any]) -> AdaptationSettings:
             section.get(
                 "startup_amplitude_tau_s",
                 defaults.startup_amplitude_tau_s,
+            )
+        ),
+        low_activity_gating_enabled=bool(
+            section.get(
+                "low_activity_gating_enabled",
+                defaults.low_activity_gating_enabled,
+            )
+        ),
+        low_activity_window_ms=int(
+            section.get(
+                "low_activity_window_ms",
+                defaults.low_activity_window_ms,
+            )
+        ),
+        low_activity_ratio_per_sec=float(
+            section.get(
+                "low_activity_ratio_per_sec",
+                defaults.low_activity_ratio_per_sec,
+            )
+        ),
+        low_activity_floor_per_sec=float(
+            section.get(
+                "low_activity_floor_per_sec",
+                defaults.low_activity_floor_per_sec,
             )
         ),
     )
@@ -540,6 +582,12 @@ def _validate_config(config: AppConfig) -> None:
         raise ValueError("calibration.amplitude_floor must be positive.")
     if config.calibration.padding_ratio < 0.0:
         raise ValueError("calibration.padding_ratio must be non-negative.")
+    if config.adaptation.low_activity_window_ms <= 0:
+        raise ValueError("adaptation.low_activity_window_ms must be positive.")
+    if config.adaptation.low_activity_ratio_per_sec <= 0.0:
+        raise ValueError("adaptation.low_activity_ratio_per_sec must be positive.")
+    if config.adaptation.low_activity_floor_per_sec <= 0.0:
+        raise ValueError("adaptation.low_activity_floor_per_sec must be positive.")
     if config.hold.activity_window_ms <= 0:
         raise ValueError("hold.activity_window_ms must be positive.")
     if config.hold.ratio_per_sec_enter <= 0.0:
@@ -585,6 +633,14 @@ def _validate_config(config: AppConfig) -> None:
         raise ValueError("extrema.prominence_ratio must be positive.")
     if config.raw_qc.raw_saturation_lo >= config.raw_qc.raw_saturation_hi:
         raise ValueError("raw_qc saturation bounds must be ordered.")
+    if config.movement.low_activity_window_ms <= 0:
+        raise ValueError("movement.low_activity_window_ms must be positive.")
+    if config.movement.low_activity_ratio_per_sec <= 0.0:
+        raise ValueError("movement.low_activity_ratio_per_sec must be positive.")
+    if config.movement.low_activity_floor_per_sec <= 0.0:
+        raise ValueError("movement.low_activity_floor_per_sec must be positive.")
+    if not (0.0 <= config.movement.low_activity_drift_scale <= 1.0):
+        raise ValueError("movement.low_activity_drift_scale must be between 0 and 1.")
 
 
 def _validate_filter_section(

@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from collections.abc import Iterable
 
-from pylsl import StreamInfo, StreamOutlet
+from pylsl import StreamInfo, StreamOutlet, local_clock
 
 
 class LSLBreathingSender:
@@ -44,7 +44,16 @@ class LSLBreathingSender:
                 channel.append_child_value("label", str(label))
         self.outlet = StreamOutlet(self.info)
 
-    def send(self, data: float | int | Iterable[float | int]) -> None:
+    def now(self) -> float:
+        """Return the current LSL clock time."""
+
+        return float(local_clock())
+
+    def send(
+        self,
+        data: float | int | Iterable[float | int],
+        timestamp: float | None = None,
+    ) -> None:
         """Send one sample to the LSL outlet.
 
         Parameters
@@ -56,6 +65,11 @@ class LSLBreathingSender:
         """
 
         if isinstance(data, (float, int)):
-            self.outlet.push_sample([float(data)])
+            sample = [float(data)]
         else:
-            self.outlet.push_sample([float(x) for x in data])
+            sample = [float(x) for x in data]
+
+        if timestamp is None:
+            self.outlet.push_sample(sample)
+        else:
+            self.outlet.push_sample(sample, float(timestamp))

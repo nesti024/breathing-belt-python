@@ -8,7 +8,6 @@ from src.pipeline import PipelineConfig, create_pipeline_state, process_device_r
 from src.quality import raw_qc_summary
 from src.settings import (
     AdaptationSettings,
-    ArtifactConfig,
     CalibrationSettings,
     ExtremaConfig,
     FilterConfig,
@@ -40,7 +39,6 @@ def _make_pipeline_config(
         processed_sensor_column=processed_sensor_column,
         invert_signal=invert_signal,
         filter=FilterConfig(hp_cutoff_hz=0.005, hp_order=1, lp_cutoff_hz=1.5, lp_order=2),
-        artifact=ArtifactConfig(spike_threshold=2.5, artifact_window=10),
         calibration=CalibrationSettings(
             duration_s=calibration_duration_s,
             percentile_lo=5.0,
@@ -693,6 +691,59 @@ def test_pipeline_movement_mode_invert_signal_flips_movement_direction() -> None
     )
 
 
+def test_pipeline_movement_mode_low_activity_slowdown_preserves_plateau_longer() -> None:
+    base_movement = dict(
+        hp_cutoff_hz=0.10,
+        hp_order=1,
+        lp_cutoff_hz=1.2,
+        lp_order=2,
+        low_activity_window_ms=200,
+        low_activity_ratio_per_sec=0.10,
+        low_activity_floor_per_sec=0.01,
+        low_activity_drift_scale=0.03,
+    )
+    slowed_cfg = _make_pipeline_config(
+        calibration_duration_s=5.0,
+        processing_mode="movement",
+        movement=MovementConfig(
+            low_activity_slowdown_enabled=True,
+            **base_movement,
+        ),
+    )
+    unslowed_cfg = _make_pipeline_config(
+        calibration_duration_s=5.0,
+        processing_mode="movement",
+        movement=MovementConfig(
+            low_activity_slowdown_enabled=False,
+            **base_movement,
+        ),
+    )
+    calibration_values = _make_breathing_values(slowed_cfg.calibration_target_samples, amplitude=20.0)
+    runtime_values = np.concatenate(
+        [
+            np.linspace(512.0, 540.0, 80, dtype=float),
+            np.full(600, 540.0, dtype=float),
+        ]
+    )
+
+    slowed_samples, _ = _replay(np.concatenate([calibration_values, runtime_values]), slowed_cfg)
+    unslowed_samples, _ = _replay(np.concatenate([calibration_values, runtime_values]), unslowed_cfg)
+    slowed_movement = np.array(
+        [sample.movement_value for sample in slowed_samples if sample.movement_value is not None],
+        dtype=float,
+    )
+    unslowed_movement = np.array(
+        [sample.movement_value for sample in unslowed_samples if sample.movement_value is not None],
+        dtype=float,
+    )
+
+    plateau_tail = slice(-100, None)
+    slowed_tail = float(np.mean(np.abs(slowed_movement[plateau_tail])))
+    unslowed_tail = float(np.mean(np.abs(unslowed_movement[plateau_tail])))
+
+    assert slowed_tail > unslowed_tail * 1.2
+
+
 def test_pipeline_adaptive_mode_outputs_bounded_control_and_centered_movement() -> None:
     cfg = _make_pipeline_config(
         calibration_duration_s=5.0,
@@ -768,6 +819,69 @@ def test_pipeline_adaptive_mode_updates_amplitude_for_changed_breathing_range() 
     assert state.adaptive_state is not None
     assert amplitudes.size > 0
     assert float(np.median(amplitudes[-60:])) > float(np.median(amplitudes[:60])) * 1.3
+
+
+def test_pipeline_adaptive_mode_low_activity_gating_reduces_recentering_on_plateau() -> None:
+    base_adaptation = dict(
+        center_enabled=True,
+        amplitude_enabled=True,
+        center_tau_s=1.0,
+        amplitude_tau_s=1.0,
+        startup_duration_s=0.2,
+        startup_center_tau_s=0.2,
+        startup_amplitude_tau_s=0.2,
+        low_activity_window_ms=200,
+        low_activity_ratio_per_sec=0.10,
+        low_activity_floor_per_sec=0.01,
+    )
+    gated_cfg = _make_pipeline_config(
+        calibration_duration_s=5.0,
+        processing_mode="adaptive",
+        adaptation=AdaptationSettings(
+            low_activity_gating_enabled=True,
+            **base_adaptation,
+        ),
+    )
+    ungated_cfg = _make_pipeline_config(
+        calibration_duration_s=5.0,
+        processing_mode="adaptive",
+        adaptation=AdaptationSettings(
+            low_activity_gating_enabled=False,
+            **base_adaptation,
+        ),
+    )
+    calibration_values = _make_breathing_values(gated_cfg.calibration_target_samples, amplitude=20.0)
+    runtime_values = np.concatenate(
+        [
+            np.linspace(512.0, 540.0, 80, dtype=float),
+            np.full(320, 540.0, dtype=float),
+        ]
+    )
+
+    gated_samples, _ = _replay(np.concatenate([calibration_values, runtime_values]), gated_cfg)
+    ungated_samples, _ = _replay(np.concatenate([calibration_values, runtime_values]), ungated_cfg)
+    gated_runtime = [sample for sample in gated_samples if sample.stage == "runtime"]
+    ungated_runtime = [sample for sample in ungated_samples if sample.stage == "runtime"]
+    gated_centers = np.array(
+        [sample.adaptive_center for sample in gated_runtime if sample.adaptive_center is not None],
+        dtype=float,
+    )
+    ungated_centers = np.array(
+        [sample.adaptive_center for sample in ungated_runtime if sample.adaptive_center is not None],
+        dtype=float,
+    )
+    gated_normalized = np.array(
+        [sample.normalized_value for sample in gated_runtime if sample.normalized_value is not None],
+        dtype=float,
+    )
+    ungated_normalized = np.array(
+        [sample.normalized_value for sample in ungated_runtime if sample.normalized_value is not None],
+        dtype=float,
+    )
+
+    plateau_tail = slice(-100, None)
+    assert float(np.median(ungated_centers[plateau_tail])) > float(np.median(gated_centers[plateau_tail])) + 5.0
+    assert float(np.median(gated_normalized[plateau_tail])) > float(np.median(ungated_normalized[plateau_tail])) + 0.05
 
 
 def test_pipeline_adaptive_mode_invert_signal_flips_centered_movement_direction() -> None:

@@ -25,7 +25,6 @@ def _make_config() -> AppConfig:
         lsl=defaults.lsl,
         filter=defaults.filter,
         movement=defaults.movement,
-        artifact=defaults.artifact,
         calibration=defaults.calibration,
         adaptation=defaults.adaptation,
         hold=defaults.hold,
@@ -207,6 +206,8 @@ def test_session_writer_creates_expected_files_and_rows() -> None:
             == 0.01
         )
         assert stored_metadata["control_model"]["output_smoothing_edge_margin_ratio"] == 0.1
+        assert stored_metadata["adaptation_settings"]["low_activity_gating_enabled"] is True
+        assert stored_metadata["adaptation_settings"]["low_activity_window_ms"] == 800
         assert stored_metadata["lsl_stream"]["channel_count"] == 2
         assert stored_metadata["lsl_stream"]["channel_names"] == ["breath_level", "event_code"]
         assert stored_metadata["movement_model"]["active"] is False
@@ -307,6 +308,8 @@ def test_session_writer_records_movement_mode_rows_and_metadata() -> None:
         assert stored_metadata["movement_model"]["active"] is True
         assert stored_metadata["adaptive_model"]["active"] is False
         assert stored_metadata["movement_model"]["reference_amplitude"] == 2.0
+        assert stored_metadata["movement_model"]["low_activity_slowdown_enabled"] is False
+        assert stored_metadata["movement_model"]["low_activity_window_ms"] == 800
         assert stored_metadata["lsl_stream"]["stream_name"] == "BreathingBeltMovement"
         assert stored_metadata["lsl_stream"]["channel_names"] == ["movement_value", "event_code"]
     finally:
@@ -404,6 +407,8 @@ def test_session_writer_records_adaptive_mode_rows_and_metadata() -> None:
         assert stored_metadata["movement_model"]["active"] is False
         assert stored_metadata["adaptive_model"]["active"] is True
         assert stored_metadata["adaptive_model"]["initial_amplitude"] == 1.5
+        assert stored_metadata["adaptive_model"]["low_activity_gating_enabled"] is True
+        assert stored_metadata["adaptive_model"]["low_activity_window_ms"] == 800
         assert stored_metadata["lsl_stream"]["stream_name"] == "BreathingBeltAdaptive"
         assert stored_metadata["lsl_stream"]["channel_names"] == ["breath_level", "event_code"]
     finally:
