@@ -151,3 +151,34 @@ def test_update_live_plots_uses_non_degenerate_limits_for_flat_raw_window() -> N
         assert (raw_y_limits[1] - raw_y_limits[0]) >= 1.0
     finally:
         plt.close(fig)
+
+
+def test_update_live_plots_supports_autoscaled_movement_trace() -> None:
+    fig, raw_ax, raw_line, normalized_ax, normalized_line, _ = setup_live_plots(
+        normalized_title="Movement Proxy (Centered)",
+        normalized_label="Movement Proxy",
+    )
+
+    try:
+        movement_values = np.array([-5.0, 0.0, 8.0], dtype=float)
+        update_live_plots(
+            raw_channel_data=np.array([10.0, 20.0, 30.0], dtype=float),
+            raw_time=np.array([0.0, 1.0, 2.0], dtype=float),
+            normalized_channel_data=movement_values,
+            normalized_time=np.array([0.0, 1.0, 2.0], dtype=float),
+            raw_ax=raw_ax,
+            raw_line=raw_line,
+            normalized_ax=normalized_ax,
+            normalized_line=normalized_line,
+            normalized_clip_range=None,
+            normalized_fixed_ylim=None,
+            normalized_autoscale_y=True,
+        )
+
+        assert normalized_ax.get_title() == "Movement Proxy (Centered)"
+        assert np.allclose(normalized_line.get_ydata(), movement_values)
+        normalized_y_limits = normalized_ax.get_ylim()
+        assert normalized_y_limits[0] < -5.0
+        assert normalized_y_limits[1] > 8.0
+    finally:
+        plt.close(fig)

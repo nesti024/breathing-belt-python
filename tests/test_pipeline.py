@@ -13,6 +13,7 @@ from src.settings import (
     ExtremaConfig,
     FilterConfig,
     HoldConfig,
+    MovementConfig,
     OutputSmoothingConfig,
     RawQCConfig,
 )
@@ -26,8 +27,10 @@ def _make_pipeline_config(
     processed_sensor_column: int = 5,
     calibration_duration_s: float = 0.2,
     invert_signal: bool = False,
+    processing_mode: str = "control",
     adaptation: AdaptationSettings | None = None,
     hold: HoldConfig | None = None,
+    movement: MovementConfig | None = None,
     output_smoothing: OutputSmoothingConfig | None = None,
     extrema: ExtremaConfig | None = None,
     raw_qc: RawQCConfig | None = None,
@@ -78,6 +81,8 @@ def _make_pipeline_config(
         ),
         extrema=extrema or ExtremaConfig(min_interval_ms=800, prominence_ratio=0.1),
         raw_qc=raw_qc or RawQCConfig(),
+        processing_mode=processing_mode,
+        movement=movement or MovementConfig(),
     )
 
 
@@ -614,6 +619,80 @@ def test_pipeline_invert_signal_flips_control_direction() -> None:
     )
 
 
+def test_pipeline_movement_mode_outputs_centered_unclamped_signal() -> None:
+    cfg = _make_pipeline_config(
+        calibration_duration_s=5.0,
+        processing_mode="movement",
+    )
+    values = np.concatenate(
+        [
+            _make_breathing_values(cfg.calibration_target_samples, amplitude=20.0),
+            _make_breathing_values(500, amplitude=25.0),
+        ]
+    )
+
+    samples, state = _replay(values, cfg)
+
+    calibration_filtered = np.array(
+        [sample.cleaned_value for sample in samples[: cfg.calibration_target_samples]],
+        dtype=float,
+    )
+    runtime_samples = [sample for sample in samples if sample.stage == "runtime"]
+    movement_values = np.array(
+        [sample.movement_value for sample in runtime_samples if sample.movement_value is not None],
+        dtype=float,
+    )
+
+    assert state.calibration_result is not None
+    assert np.isclose(
+        state.calibration_result.center,
+        float(np.median(calibration_filtered)),
+        atol=0.5,
+    )
+    assert runtime_samples[0].normalized_value is None
+    assert runtime_samples[0].movement_value is not None
+    assert all(not sample.hold_mode_active for sample in runtime_samples)
+    assert float(np.max(movement_values)) > 1.0
+    assert float(np.min(movement_values)) < -1.0
+
+
+def test_pipeline_movement_mode_invert_signal_flips_movement_direction() -> None:
+    normal_cfg = _make_pipeline_config(
+        calibration_duration_s=5.0,
+        processing_mode="movement",
+        invert_signal=False,
+    )
+    inverted_cfg = _make_pipeline_config(
+        calibration_duration_s=5.0,
+        processing_mode="movement",
+        invert_signal=True,
+    )
+    values = np.concatenate(
+        [
+            _make_breathing_values(normal_cfg.calibration_target_samples, amplitude=20.0),
+            _make_breathing_values(400, amplitude=25.0),
+        ]
+    )
+
+    normal_samples, _ = _replay(values, normal_cfg)
+    inverted_samples, _ = _replay(values, inverted_cfg)
+    normal_movement = np.array(
+        [sample.movement_value for sample in normal_samples if sample.movement_value is not None],
+        dtype=float,
+    )
+    inverted_movement = np.array(
+        [sample.movement_value for sample in inverted_samples if sample.movement_value is not None],
+        dtype=float,
+    )
+
+    compare_slice = slice(50, None)
+    assert np.allclose(
+        normal_movement[compare_slice],
+        -inverted_movement[compare_slice],
+        atol=0.75,
+    )
+
+
 def test_pipeline_emits_inhale_and_exhale_events_for_breath_cycles() -> None:
     cfg = _make_pipeline_config(extrema=ExtremaConfig(min_interval_ms=600, prominence_ratio=0.05))
     values = np.concatenate(
@@ -630,6 +709,27 @@ def test_pipeline_emits_inhale_and_exhale_events_for_breath_cycles() -> None:
     assert "inhale_peak" in labels
     assert "exhale_trough" in labels
     assert abs(labels.count("inhale_peak") - labels.count("exhale_trough")) <= 1
+
+
+def test_pipeline_movement_mode_emits_inhale_and_exhale_events_for_breath_cycles() -> None:
+    cfg = _make_pipeline_config(
+        calibration_duration_s=5.0,
+        processing_mode="movement",
+        extrema=ExtremaConfig(min_interval_ms=600, prominence_ratio=0.05),
+    )
+    values = np.concatenate(
+        [
+            _make_breathing_values(cfg.calibration_target_samples, amplitude=20.0),
+            _make_breathing_values(800, amplitude=25.0),
+        ]
+    )
+    samples, _ = _replay(values, cfg)
+
+    runtime_samples = [sample for sample in samples if sample.stage == "runtime"]
+    labels = [sample.extrema_event_label for sample in runtime_samples if sample.extrema_event_label is not None]
+
+    assert "inhale_peak" in labels
+    assert "exhale_trough" in labels
 
 
 def test_pipeline_extrema_events_match_with_or_without_output_smoothing() -> None:

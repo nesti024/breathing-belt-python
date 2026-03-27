@@ -77,3 +77,23 @@ def test_lsl_sender_publishes_two_channel_samples_with_labels(monkeypatch) -> No
     channels_node = sender.info.desc().children[0]
     labels = [child.values["label"] for child in channels_node.children]
     assert labels == ["breath_level", "event_code"]
+
+
+def test_lsl_sender_supports_movement_stream_identity(monkeypatch) -> None:
+    lsl_out = _reload_lsl_module(monkeypatch)
+    sender = lsl_out.LSLBreathingSender(
+        name="BreathingBeltMovement",
+        type="BreathingMovement",
+        source_id="breathingbelt001_movement",
+        channel_labels=("movement_value", "event_code"),
+    )
+    sender.send([2.5, -1.0])
+
+    assert sender.info.name == "BreathingBeltMovement"
+    assert sender.info.type == "BreathingMovement"
+    assert sender.info.source_id == "breathingbelt001_movement"
+    assert sender.outlet.samples == [[2.5, -1.0]]
+
+    channels_node = sender.info.desc().children[0]
+    labels = [child.values["label"] for child in channels_node.children]
+    assert labels == ["movement_value", "event_code"]

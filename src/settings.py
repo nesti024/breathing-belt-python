@@ -55,6 +55,16 @@ class FilterConfig:
 
 
 @dataclass(frozen=True)
+class MovementConfig:
+    """Causal filter parameters for the live movement-proxy signal."""
+
+    hp_cutoff_hz: float = 0.03
+    hp_order: int = 1
+    lp_cutoff_hz: float = 1.5
+    lp_order: int = 2
+
+
+@dataclass(frozen=True)
 class ArtifactConfig:
     """Reversal-only artifact suppression parameters."""
 
@@ -152,6 +162,7 @@ class AppConfig:
     display: DisplayConfig
     lsl: LSLConfig
     filter: FilterConfig
+    movement: MovementConfig
     artifact: ArtifactConfig
     calibration: CalibrationSettings
     adaptation: AdaptationSettings
@@ -170,6 +181,7 @@ def default_config() -> AppConfig:
         display=DisplayConfig(),
         lsl=LSLConfig(),
         filter=FilterConfig(),
+        movement=MovementConfig(),
         artifact=ArtifactConfig(),
         calibration=CalibrationSettings(),
         adaptation=AdaptationSettings(),
@@ -199,6 +211,7 @@ def load_config(path: str | Path) -> AppConfig:
         display=_load_display_config(_section(raw_config, "display")),
         lsl=_load_lsl_config(_section(raw_config, "lsl")),
         filter=_load_filter_config(_section(raw_config, "filter")),
+        movement=_load_movement_config(_section(raw_config, "movement")),
         artifact=_load_artifact_config(_section(raw_config, "artifact")),
         calibration=_load_calibration_settings(_section(raw_config, "calibration")),
         adaptation=_load_adaptation_settings(_section(raw_config, "adaptation")),
@@ -327,6 +340,16 @@ def _load_lsl_config(section: dict[str, Any]) -> LSLConfig:
 def _load_filter_config(section: dict[str, Any]) -> FilterConfig:
     defaults = FilterConfig()
     return FilterConfig(
+        hp_cutoff_hz=float(section.get("hp_cutoff_hz", defaults.hp_cutoff_hz)),
+        hp_order=int(section.get("hp_order", defaults.hp_order)),
+        lp_cutoff_hz=float(section.get("lp_cutoff_hz", defaults.lp_cutoff_hz)),
+        lp_order=int(section.get("lp_order", defaults.lp_order)),
+    )
+
+
+def _load_movement_config(section: dict[str, Any]) -> MovementConfig:
+    defaults = MovementConfig()
+    return MovementConfig(
         hp_cutoff_hz=float(section.get("hp_cutoff_hz", defaults.hp_cutoff_hz)),
         hp_order=int(section.get("hp_order", defaults.hp_order)),
         lp_cutoff_hz=float(section.get("lp_cutoff_hz", defaults.lp_cutoff_hz)),
@@ -494,6 +517,23 @@ def _validate_config(config: AppConfig) -> None:
         raise ValueError("device.channels must contain at least one channel.")
     if config.display.plot_window_length <= 0:
         raise ValueError("display.plot_window_length must be positive.")
+    _validate_filter_section(
+        config.device.sampling_rate_hz,
+        config.filter.hp_cutoff_hz,
+        config.filter.hp_order,
+        config.filter.lp_cutoff_hz,
+        config.filter.lp_order,
+        prefix="filter",
+        validate_high_pass=False,
+    )
+    _validate_filter_section(
+        config.device.sampling_rate_hz,
+        config.movement.hp_cutoff_hz,
+        config.movement.hp_order,
+        config.movement.lp_cutoff_hz,
+        config.movement.lp_order,
+        prefix="movement",
+    )
     if config.calibration.duration_s <= 0.0:
         raise ValueError("calibration.duration_s must be positive.")
     if config.calibration.amplitude_floor <= 0.0:
@@ -545,3 +585,25 @@ def _validate_config(config: AppConfig) -> None:
         raise ValueError("extrema.prominence_ratio must be positive.")
     if config.raw_qc.raw_saturation_lo >= config.raw_qc.raw_saturation_hi:
         raise ValueError("raw_qc saturation bounds must be ordered.")
+
+
+def _validate_filter_section(
+    sampling_rate_hz: int,
+    hp_cutoff_hz: float,
+    hp_order: int,
+    lp_cutoff_hz: float,
+    lp_order: int,
+    *,
+    prefix: str,
+    validate_high_pass: bool = True,
+) -> None:
+    nyquist_hz = sampling_rate_hz / 2.0
+    if validate_high_pass:
+        if hp_cutoff_hz <= 0.0 or hp_cutoff_hz >= nyquist_hz:
+            raise ValueError(f"{prefix}.hp_cutoff_hz must be between 0 and Nyquist.")
+        if hp_order <= 0:
+            raise ValueError(f"{prefix}.hp_order must be positive.")
+    if lp_cutoff_hz <= 0.0 or lp_cutoff_hz >= nyquist_hz:
+        raise ValueError(f"{prefix}.lp_cutoff_hz must be between 0 and Nyquist.")
+    if lp_order <= 0:
+        raise ValueError(f"{prefix}.lp_order must be positive.")

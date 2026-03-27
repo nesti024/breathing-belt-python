@@ -5,6 +5,7 @@ from __future__ import annotations
 from collections import deque
 from dataclasses import dataclass, field
 import math
+from typing import Literal
 
 import numpy as np
 
@@ -15,7 +16,12 @@ from .calibration import (
     CalibrationResult,
     run_range_calibration,
 )
-from .preprocessing import get_low_pass_filter_coeffs, low_pass_filter_sample
+from .preprocessing import (
+    get_high_pass_filter_coeffs,
+    get_low_pass_filter_coeffs,
+    high_pass_filter_sample,
+    low_pass_filter_sample,
+)
 from .quality import RawQCEvent, RawQCState, create_raw_qc_state, update_raw_qc
 from .settings import (
     AdaptationSettings,
@@ -24,12 +30,14 @@ from .settings import (
     ExtremaConfig,
     FilterConfig,
     HoldConfig,
+    MovementConfig,
     OutputSmoothingConfig,
     RawQCConfig,
 )
 
 
 _HOLD_RELEASE_DRIFT = 0.03
+ProcessingMode = Literal["control", "movement"]
 
 
 @dataclass(frozen=True)
@@ -47,6 +55,8 @@ class PipelineConfig:
     output_smoothing: OutputSmoothingConfig
     extrema: ExtremaConfig
     raw_qc: RawQCConfig
+    processing_mode: ProcessingMode = "control"
+    movement: MovementConfig = field(default_factory=MovementConfig)
 
     @property
     def calibration_cfg(self) -> CalibrationConfig:
@@ -123,6 +133,8 @@ class PipelineSample:
     hold_mode_active: bool
     adaptive_center: float | None
     adaptive_amplitude: float | None
+    processing_mode: ProcessingMode = "control"
+    movement_value: float | None = None
     extrema_event_code: float = 0.0
     extrema_event_label: str | None = None
     messages: tuple[str, ...] = ()
@@ -201,6 +213,7 @@ def process_device_row(
     ) if cfg.raw_qc.enabled else ([], state.qc_state)
 
     normalized_value: float | None = None
+    movement_value: float | None = None
     adaptive_center: float | None = None
     adaptive_amplitude: float | None = None
     extrema_event_code = 0.0
@@ -219,31 +232,51 @@ def process_device_row(
 
         if collected >= cfg.calibration_target_samples:
             state.calibration_samples = state.calibration_samples[: cfg.calibration_target_samples]
-            state.calibration_result = run_range_calibration(
-                state.calibration_samples,
-                cfg.calibration_cfg,
-            )
-            state.adaptive_state = _build_fixed_control_state(
+            if cfg.processing_mode == "movement":
+                state.calibration_result = _run_movement_calibration(
+                    state.calibration_samples,
+                    cfg,
+                )
+            else:
+                state.calibration_result = run_range_calibration(
+                    state.calibration_samples,
+                    cfg.calibration_cfg,
+                )
+            state.adaptive_state = _build_fixed_reference_state(
                 state.calibration_samples,
                 state.calibration_result,
                 cfg.calibration.amplitude_floor,
             )
             adaptive_center = float(state.adaptive_state.center)
             adaptive_amplitude = float(state.adaptive_state.amplitude)
-            messages.extend(
-                [
-                    "Calibration complete.",
-                    (
-                        "Fixed control map: "
-                        f"center={state.calibration_result.center:.6f}, "
-                        f"amplitude={state.calibration_result.amplitude:.6f}, "
-                        f"min={state.calibration_result.global_min:.6f}, "
-                        f"max={state.calibration_result.global_max:.6f}, "
-                        f"control_min={state.calibration_result.y_min:.6f}, "
-                        f"control_max={state.calibration_result.y_max:.6f}"
-                    ),
-                ]
-            )
+            if cfg.processing_mode == "movement":
+                messages.extend(
+                    [
+                        "Movement calibration complete.",
+                        (
+                            "Movement reference: "
+                            f"center={state.calibration_result.center:.6f}, "
+                            f"reference_amplitude={state.calibration_result.amplitude:.6f}, "
+                            f"percentile_lo={state.calibration_result.global_min:.6f}, "
+                            f"percentile_hi={state.calibration_result.global_max:.6f}"
+                        ),
+                    ]
+                )
+            else:
+                messages.extend(
+                    [
+                        "Calibration complete.",
+                        (
+                            "Fixed control map: "
+                            f"center={state.calibration_result.center:.6f}, "
+                            f"amplitude={state.calibration_result.amplitude:.6f}, "
+                            f"min={state.calibration_result.global_min:.6f}, "
+                            f"max={state.calibration_result.global_max:.6f}, "
+                            f"control_min={state.calibration_result.y_min:.6f}, "
+                            f"control_max={state.calibration_result.y_max:.6f}"
+                        ),
+                    ]
+                )
             state.recent_abs_velocity.clear()
             state.recent_output_abs_velocity.clear()
             state.recent_raw_deltas.clear()
@@ -262,13 +295,22 @@ def process_device_row(
         else:
             state.stage_sample_index += 1
     else:
-        normalized_value = _normalize_runtime_sample(cleaned_value, is_artifact, state, cfg)
-        extrema_event_code, extrema_event_label = _detect_runtime_extremum(
-            cleaned_value,
-            sample_index,
-            state,
-            cfg,
-        )
+        if cfg.processing_mode == "movement":
+            movement_value = _compute_runtime_movement_value(cleaned_value, state)
+            extrema_event_code, extrema_event_label = _detect_runtime_extremum(
+                movement_value,
+                sample_index,
+                state,
+                cfg,
+            )
+        else:
+            normalized_value = _normalize_runtime_sample(cleaned_value, is_artifact, state, cfg)
+            extrema_event_code, extrema_event_label = _detect_runtime_extremum(
+                cleaned_value,
+                sample_index,
+                state,
+                cfg,
+            )
         adaptive_center = float(state.adaptive_state.center) if state.adaptive_state else None
         adaptive_amplitude = float(state.adaptive_state.amplitude) if state.adaptive_state else None
         state.runtime_processed_samples += 1
@@ -283,9 +325,13 @@ def process_device_row(
         cleaned_value=cleaned_value,
         normalized_value=normalized_value,
         is_artifact=is_artifact,
-        hold_mode_active=state.hold_mode_active if stage == "runtime" else False,
+        hold_mode_active=(
+            state.hold_mode_active if stage == "runtime" and cfg.processing_mode == "control" else False
+        ),
         adaptive_center=adaptive_center,
         adaptive_amplitude=adaptive_amplitude,
+        processing_mode=cfg.processing_mode,
+        movement_value=movement_value,
         extrema_event_code=extrema_event_code if stage == "runtime" else 0.0,
         extrema_event_label=extrema_event_label if stage == "runtime" else None,
         messages=tuple(messages),
@@ -297,19 +343,50 @@ def process_device_row(
 def _filter_sample(raw_sensor_value: float, state: PipelineState, cfg: PipelineConfig) -> float:
     control_input = -raw_sensor_value if cfg.invert_signal else raw_sensor_value
     if not state.filter_initialized:
-        state.sos_lp, state.zi_lp = get_low_pass_filter_coeffs(
-            cfg.filter.lp_cutoff_hz,
-            cfg.sampling_rate_hz,
-            cfg.filter.lp_order,
-            initial_value=control_input,
-        )
+        if cfg.processing_mode == "movement":
+            state.sos_hp, state.zi_hp = get_high_pass_filter_coeffs(
+                cfg.movement.hp_cutoff_hz,
+                cfg.sampling_rate_hz,
+                cfg.movement.hp_order,
+                initial_value=control_input,
+            )
+            state.sos_lp, state.zi_lp = get_low_pass_filter_coeffs(
+                cfg.movement.lp_cutoff_hz,
+                cfg.sampling_rate_hz,
+                cfg.movement.lp_order,
+                initial_value=0.0,
+            )
+        else:
+            state.sos_lp, state.zi_lp = get_low_pass_filter_coeffs(
+                cfg.filter.lp_cutoff_hz,
+                cfg.sampling_rate_hz,
+                cfg.filter.lp_order,
+                initial_value=control_input,
+            )
         state.filter_initialized = True
 
-    low_passed_value, state.zi_lp = low_pass_filter_sample(
-        control_input,
-        state.sos_lp,
-        state.zi_lp,
-    )
+    if state.sos_lp is None or state.zi_lp is None:
+        raise RuntimeError("Low-pass filter state must be initialized before filtering.")
+
+    if cfg.processing_mode == "movement":
+        if state.sos_hp is None or state.zi_hp is None:
+            raise RuntimeError("High-pass filter state must be initialized for movement mode.")
+        high_passed_value, state.zi_hp = high_pass_filter_sample(
+            control_input,
+            state.sos_hp,
+            state.zi_hp,
+        )
+        low_passed_value, state.zi_lp = low_pass_filter_sample(
+            float(high_passed_value),
+            state.sos_lp,
+            state.zi_lp,
+        )
+    else:
+        low_passed_value, state.zi_lp = low_pass_filter_sample(
+            control_input,
+            state.sos_lp,
+            state.zi_lp,
+        )
     return float(low_passed_value)
 
 
@@ -399,6 +476,15 @@ def _normalize_runtime_sample(
     )
 
 
+def _compute_runtime_movement_value(
+    cleaned_value: float,
+    state: PipelineState,
+) -> float:
+    if state.calibration_result is None:
+        raise RuntimeError("Calibration state must be initialized before runtime movement output.")
+    return float(cleaned_value - state.calibration_result.center)
+
+
 def _map_control_level(
     value: float,
     calibration_result: CalibrationResult,
@@ -480,18 +566,18 @@ def _is_extrema_zone(
 
 
 def _detect_runtime_extremum(
-    filtered_value: float,
+    signal_value: float,
     sample_index: int,
     state: PipelineState,
     cfg: PipelineConfig,
 ) -> tuple[float, str | None]:
     previous_value = state.previous_filtered_value
-    state.previous_filtered_value = float(filtered_value)
+    state.previous_filtered_value = float(signal_value)
     if previous_value is None:
         state.previous_delta_sign = 0
         return 0.0, None
 
-    delta = float(filtered_value) - previous_value
+    delta = float(signal_value) - previous_value
     event_code = 0.0
     event_label: str | None = None
     candidate_index = max(sample_index - 1, 0)
@@ -499,6 +585,7 @@ def _detect_runtime_extremum(
         cfg.calibration.amplitude_floor,
         cfg.extrema.prominence_ratio * max(state.adaptive_state.amplitude, cfg.calibration.amplitude_floor),
     )
+    baseline_value = 0.0 if cfg.processing_mode == "movement" else state.adaptive_state.center
 
     if state.previous_delta_sign > 0 and delta <= 0.0:
         if _extremum_interval_elapsed(candidate_index, state, cfg):
@@ -506,7 +593,7 @@ def _detect_runtime_extremum(
             reference_value = (
                 state.last_trough_value
                 if state.last_trough_value is not None
-                else state.adaptive_state.center
+                else baseline_value
             )
             if (
                 candidate_value - reference_value >= prominence_threshold
@@ -521,7 +608,7 @@ def _detect_runtime_extremum(
             reference_value = (
                 state.last_peak_value
                 if state.last_peak_value is not None
-                else state.adaptive_state.center
+                else baseline_value
             )
             if (
                 reference_value - candidate_value >= prominence_threshold
@@ -550,7 +637,48 @@ def _extremum_interval_elapsed(
     return (candidate_index - state.last_event_sample_index) >= cfg.extrema_min_interval_samples
 
 
-def _build_fixed_control_state(
+def _run_movement_calibration(
+    calibration_samples: list[float] | np.ndarray,
+    cfg: PipelineConfig,
+) -> CalibrationResult:
+    samples = np.asarray(calibration_samples, dtype=float).reshape(-1)
+    if samples.size == 0:
+        raise ValueError("Movement calibration requires at least one sample.")
+
+    sorted_samples = np.sort(samples)
+    n_samples = int(sorted_samples.size)
+    lo_idx = int(n_samples * cfg.calibration.percentile_lo / 100.0)
+    hi_idx = int(n_samples * cfg.calibration.percentile_hi / 100.0) - 1
+    lo_idx = max(0, min(lo_idx, n_samples - 1))
+    hi_idx = max(0, min(hi_idx, n_samples - 1))
+    if hi_idx < lo_idx:
+        lo_idx = 0
+        hi_idx = n_samples - 1
+
+    percentile_lo = float(sorted_samples[lo_idx])
+    percentile_hi = float(sorted_samples[hi_idx])
+    center = float(np.median(samples))
+    amplitude = max(
+        0.5 * (percentile_hi - percentile_lo),
+        float(cfg.calibration.amplitude_floor),
+    )
+
+    return CalibrationResult(
+        global_min=percentile_lo,
+        global_max=percentile_hi,
+        center=center,
+        amplitude=amplitude,
+        y_min=percentile_lo,
+        y_max=percentile_hi,
+        saturated=False,
+        n_samples=n_samples,
+        saturated_count=0,
+        lo_idx=lo_idx,
+        hi_idx=hi_idx,
+    )
+
+
+def _build_fixed_reference_state(
     calibration_samples: list[float] | np.ndarray,
     calibration_result: CalibrationResult,
     amplitude_floor: float,

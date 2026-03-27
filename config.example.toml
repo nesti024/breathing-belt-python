@@ -30,6 +30,14 @@ hp_order = 1
 lp_cutoff_hz = 1.5
 lp_order = 2
 
+[movement]
+# Realtime movement-proxy mode uses a slow causal high-pass for drift removal
+# followed by a light causal low-pass.
+hp_cutoff_hz = 0.03
+hp_order = 1
+lp_cutoff_hz = 1.5
+lp_order = 2
+
 [artifact]
 # Artifact suppression settings are retained for backward compatibility and are
 # not used by the fixed-calibration VR control path.

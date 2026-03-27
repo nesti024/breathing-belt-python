@@ -8,6 +8,7 @@ from pathlib import Path
 import sys
 import time
 import traceback
+from typing import Callable, TextIO
 
 import numpy as np
 
@@ -17,7 +18,7 @@ if __package__ in {None, ""}:
         sys.path.insert(0, str(repo_root))
 
     from src import __version__
-    from src.pipeline import PipelineConfig, create_pipeline_state, process_device_row
+    from src.pipeline import PipelineConfig, ProcessingMode, create_pipeline_state, process_device_row
     from src.quality import raw_qc_summary
     from src.session_writer import SessionWriter, build_session_metadata
     from src.settings import AppConfig, load_config
@@ -38,7 +39,7 @@ if __package__ in {None, ""}:
         return LSLBreathingSender
 else:
     from . import __version__
-    from .pipeline import PipelineConfig, create_pipeline_state, process_device_row
+    from .pipeline import PipelineConfig, ProcessingMode, create_pipeline_state, process_device_row
     from .quality import raw_qc_summary
     from .session_writer import SessionWriter, build_session_metadata
     from .settings import AppConfig, load_config
@@ -87,6 +88,31 @@ def main(argv: list[str] | None = None) -> int:
     return 0
 
 
+def prompt_processing_mode(
+    input_func: Callable[[str], str] = input,
+    output_stream: TextIO | None = None,
+) -> tuple[int, ProcessingMode]:
+    """Prompt for a numbered live-processing mode and return the selection."""
+
+    stream = sys.stdout if output_stream is None else output_stream
+    while True:
+        print("Select processing mode:", file=stream)
+        print("1 = Legacy control (0..1, hold/smoothing)", file=stream)
+        print("2 = Realtime movement proxy (centered, unclamped)", file=stream)
+        try:
+            selection = input_func("Enter mode number [1]: ").strip()
+        except EOFError:
+            return 1, "control"
+
+        if selection == "":
+            return 1, "control"
+        if selection == "1":
+            return 1, "control"
+        if selection == "2":
+            return 2, "movement"
+        print("Invalid selection. Enter 1 or 2.", file=stream)
+
+
 def run_acquisition(config: AppConfig) -> None:
     """Acquire, normalize, plot, stream, and persist breathing-belt data."""
 
@@ -110,6 +136,16 @@ def run_acquisition(config: AppConfig) -> None:
     trough_sample_indices: list[int] = []
     trough_raw_values: list[float] = []
     acquisition_sample_index = 0
+    selected_mode_number, processing_mode = prompt_processing_mode()
+    print(
+        "Selected mode "
+        f"{selected_mode_number}: "
+        + (
+            "Legacy control (0..1, hold/smoothing)"
+            if processing_mode == "control"
+            else "Realtime movement proxy (centered, unclamped)"
+        )
+    )
     pipeline_cfg = PipelineConfig(
         sampling_rate_hz=config.device.sampling_rate_hz,
         processed_sensor_column=config.device.processed_sensor_column,
@@ -122,6 +158,8 @@ def run_acquisition(config: AppConfig) -> None:
         output_smoothing=config.output_smoothing,
         extrema=config.extrema,
         raw_qc=config.raw_qc,
+        processing_mode=processing_mode,
+        movement=config.movement,
     )
     pipeline_state = create_pipeline_state(pipeline_cfg)
     session_started_at = datetime.now().astimezone().isoformat()
@@ -146,20 +184,40 @@ def run_acquisition(config: AppConfig) -> None:
         if config.display.enable_plot:
             setup_live_plots, update_live_plots = _import_plot_helpers()
             _, raw_ax, raw_line, normalized_ax, normalized_line, blit_manager = (
-                setup_live_plots()
+                setup_live_plots(
+                    normalized_title=(
+                        "Breath Level (0-1)"
+                        if processing_mode == "control"
+                        else "Movement Proxy (Centered)"
+                    ),
+                    normalized_label=(
+                        "Breath Level"
+                        if processing_mode == "control"
+                        else "Movement Proxy"
+                    ),
+                )
             )
         else:
             update_live_plots = None
 
         if config.lsl.enable:
             LSLBreathingSender = _import_lsl_sender()
+            stream_name = config.lsl.stream_name
+            stream_type = config.lsl.stream_type
+            source_id = config.lsl.source_id
+            channel_labels = ("breath_level", "event_code")
+            if processing_mode == "movement":
+                stream_name = f"{stream_name}Movement"
+                stream_type = "BreathingMovement"
+                source_id = f"{source_id}_movement"
+                channel_labels = ("movement_value", "event_code")
             lsl_sender = LSLBreathingSender(
-                name=config.lsl.stream_name,
-                type=config.lsl.stream_type,
+                name=stream_name,
+                type=stream_type,
                 channel_count=2,
                 nominal_srate=config.device.sampling_rate_hz,
-                source_id=config.lsl.source_id,
-                channel_labels=("breath_level", "event_code"),
+                source_id=source_id,
+                channel_labels=channel_labels,
             )
 
         print(
@@ -195,9 +253,14 @@ def run_acquisition(config: AppConfig) -> None:
                 raw_signal.append(sample.selected_sensor_raw)
 
                 if sample.stage == "runtime":
-                    if sample.normalized_value is not None:
+                    runtime_value = (
+                        sample.normalized_value
+                        if processing_mode == "control"
+                        else sample.movement_value
+                    )
+                    if runtime_value is not None:
                         normalized_sample_indices.append(acquisition_sample_index)
-                        normalized_signal.append(sample.normalized_value)
+                        normalized_signal.append(runtime_value)
                         if sample.extrema_event_code > 0.0:
                             peak_sample_indices.append(acquisition_sample_index)
                             peak_raw_values.append(sample.selected_sensor_raw)
@@ -205,10 +268,11 @@ def run_acquisition(config: AppConfig) -> None:
                             trough_sample_indices.append(acquisition_sample_index)
                             trough_raw_values.append(sample.selected_sensor_raw)
                         if lsl_sender is not None:
-                            lsl_sender.send(
-                                [sample.normalized_value, sample.extrema_event_code]
-                            )
-                        print(f"Normalized: {sample.normalized_value:.4f}")
+                            lsl_sender.send([runtime_value, sample.extrema_event_code])
+                        if processing_mode == "control":
+                            print(f"Normalized: {runtime_value:.4f}")
+                        else:
+                            print(f"Movement: {runtime_value:.4f}")
                         if sample.extrema_event_label is not None:
                             print(f"Breath event: {sample.extrema_event_label}")
                 acquisition_sample_index += 1
@@ -234,7 +298,11 @@ def run_acquisition(config: AppConfig) -> None:
                         f"Plot window range check: min={window_min:.4f}, "
                         f"max={window_max:.4f}, points={len(normalized_array)}"
                     )
-                if normalized_array.size > 0 and (window_min < 0.0 or window_max > 1.0):
+                if (
+                    processing_mode == "control"
+                    and normalized_array.size > 0
+                    and (window_min < 0.0 or window_max > 1.0)
+                ):
                     print(
                         "WARNING: plotted window out of [0,1] "
                         f"(min={window_min:.6f}, max={window_max:.6f})"
@@ -253,6 +321,9 @@ def run_acquisition(config: AppConfig) -> None:
                     peak_values=peak_raw_values,
                     trough_times=trough_sample_indices,
                     trough_values=trough_raw_values,
+                    normalized_clip_range=(0.0, 1.0) if processing_mode == "control" else None,
+                    normalized_fixed_ylim=(0.0, 1.0) if processing_mode == "control" else None,
+                    normalized_autoscale_y=processing_mode == "movement",
                     blit_manager=blit_manager,
                 )
     finally:
@@ -271,6 +342,8 @@ def run_acquisition(config: AppConfig) -> None:
                 calibration_result=pipeline_state.calibration_result,
                 adaptive_state=pipeline_state.adaptive_state,
                 qc_summary=raw_qc_summary(pipeline_state.qc_state),
+                processing_mode=processing_mode,
+                selected_mode_number=selected_mode_number,
             )
             session_writer.finalize(metadata)
         print("Connection closed.")

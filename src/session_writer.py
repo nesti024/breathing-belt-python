@@ -33,10 +33,12 @@ class SessionWriter:
                 "stage",
                 "sample_index",
                 "relative_time_s",
+                "processing_mode",
                 "selected_sensor_raw",
                 "filtered_value",
                 "cleaned_value",
                 "normalized_value",
+                "movement_value",
                 "is_artifact",
                 "hold_mode_active",
                 "extrema_event_code",
@@ -102,11 +104,15 @@ class SessionWriter:
                 "stage": sample.stage,
                 "sample_index": sample.sample_index,
                 "relative_time_s": f"{sample.relative_time_s:.6f}",
+                "processing_mode": sample.processing_mode,
                 "selected_sensor_raw": f"{sample.selected_sensor_raw:.6f}",
                 "filtered_value": f"{sample.filtered_value:.6f}",
                 "cleaned_value": f"{sample.cleaned_value:.6f}",
                 "normalized_value": (
                     "" if sample.normalized_value is None else f"{sample.normalized_value:.6f}"
+                ),
+                "movement_value": (
+                    "" if sample.movement_value is None else f"{sample.movement_value:.6f}"
                 ),
                 "is_artifact": int(sample.is_artifact),
                 "hold_mode_active": int(sample.hold_mode_active),
@@ -163,18 +169,28 @@ def build_session_metadata(
     calibration_result: Any,
     adaptive_state: Any,
     qc_summary: dict[str, Any],
+    processing_mode: str = "control",
+    selected_mode_number: int = 1,
 ) -> dict[str, Any]:
     """Build a JSON-serializable metadata object for one session."""
 
     calibration_payload = None if calibration_result is None else asdict(calibration_result)
     adaptive_payload = None if adaptive_state is None else asdict(adaptive_state)
-    control_min = None if calibration_result is None else float(calibration_result.y_min)
-    control_max = None if calibration_result is None else float(calibration_result.y_max)
+    control_active = processing_mode == "control"
+    movement_active = processing_mode == "movement"
+    control_min = (
+        None if calibration_result is None or not control_active else float(calibration_result.y_min)
+    )
+    control_max = (
+        None if calibration_result is None or not control_active else float(calibration_result.y_max)
+    )
     metadata = {
         "started_at": started_at,
         "ended_at": ended_at,
         "software_version": software_version,
         "resolved_config_path": str(resolved_config_path),
+        "processing_mode": processing_mode,
+        "selected_mode_number": selected_mode_number,
         "acquired_channels": list(config.device.channels),
         "processed_sensor_column": config.device.processed_sensor_column,
         "invert_signal": config.device.invert_signal,
@@ -189,6 +205,7 @@ def build_session_metadata(
             "startup_amplitude_tau_s": config.adaptation.startup_amplitude_tau_s,
         },
         "control_model": {
+            "active": control_active,
             "mode": "fixed_calibration_padded_extrema_hold_output_smoothing",
             "lp_cutoff_hz": config.filter.lp_cutoff_hz,
             "lp_order": config.filter.lp_order,
@@ -214,10 +231,51 @@ def build_session_metadata(
             "extrema_min_interval_ms": config.extrema.min_interval_ms,
             "extrema_prominence_ratio": config.extrema.prominence_ratio,
         },
+        "movement_model": {
+            "active": movement_active,
+            "mode": "realtime_centered_movement_proxy",
+            "hp_cutoff_hz": config.movement.hp_cutoff_hz,
+            "hp_order": config.movement.hp_order,
+            "lp_cutoff_hz": config.movement.lp_cutoff_hz,
+            "lp_order": config.movement.lp_order,
+            "calibration_center": (
+                None if calibration_result is None or not movement_active else float(calibration_result.center)
+            ),
+            "reference_amplitude": (
+                None if calibration_result is None or not movement_active else float(calibration_result.amplitude)
+            ),
+            "percentile_lo": (
+                None if calibration_result is None or not movement_active else float(calibration_result.global_min)
+            ),
+            "percentile_hi": (
+                None if calibration_result is None or not movement_active else float(calibration_result.global_max)
+            ),
+            "extrema_min_interval_ms": config.extrema.min_interval_ms,
+            "extrema_prominence_ratio": config.extrema.prominence_ratio,
+        },
         "lsl_stream": {
             "enabled": config.lsl.enable,
             "channel_count": 2 if config.lsl.enable else 0,
-            "channel_names": ["breath_level", "event_code"] if config.lsl.enable else [],
+            "stream_name": (
+                config.lsl.stream_name
+                if processing_mode == "control"
+                else f"{config.lsl.stream_name}Movement"
+            ) if config.lsl.enable else None,
+            "stream_type": (
+                config.lsl.stream_type
+                if processing_mode == "control"
+                else "BreathingMovement"
+            ) if config.lsl.enable else None,
+            "source_id": (
+                config.lsl.source_id
+                if processing_mode == "control"
+                else f"{config.lsl.source_id}_movement"
+            ) if config.lsl.enable else None,
+            "channel_names": (
+                ["breath_level", "event_code"]
+                if processing_mode == "control"
+                else ["movement_value", "event_code"]
+            ) if config.lsl.enable else [],
         },
         "final_adaptive_state": adaptive_payload,
         "raw_qc_summary": qc_summary,

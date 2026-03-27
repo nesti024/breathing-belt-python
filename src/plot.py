@@ -97,13 +97,15 @@ def setup_live_plots(
     *,
     raw_title: str = "Raw Sensor Signal",
     normalized_title: str = "Breath Level (0-1)",
+    normalized_label: str = "Breath Level",
+    normalized_ylabel: str = "Amplitude",
 ) -> tuple[Figure, Axes, Line2D, Axes, Line2D, None]:
     """Create and show a two-panel live dashboard for raw and normalized traces."""
 
     plt.ion()
     fig, (raw_ax, normalized_ax) = plt.subplots(1, 2, figsize=(14, 4))
     raw_line, = raw_ax.plot([], [], label="Raw Sensor Signal")
-    normalized_line, = normalized_ax.plot([], [], label="Breath Level")
+    normalized_line, = normalized_ax.plot([], [], label=normalized_label)
 
     raw_ax.set_xlabel("Sample")
     raw_ax.set_ylabel("Raw Amplitude")
@@ -113,7 +115,7 @@ def setup_live_plots(
     raw_ax.legend()
 
     normalized_ax.set_xlabel("Sample")
-    normalized_ax.set_ylabel("Amplitude")
+    normalized_ax.set_ylabel(normalized_ylabel)
     normalized_ax.set_xlim(0, 1)
     normalized_ax.set_ylim(0, 1)
     normalized_ax.set_title(normalized_title)
@@ -141,6 +143,9 @@ def update_live_plots(
     peak_values: Sequence[float] | np.ndarray | None = None,
     trough_times: Sequence[float] | np.ndarray | None = None,
     trough_values: Sequence[float] | np.ndarray | None = None,
+    normalized_clip_range: tuple[float, float] | None = (0.0, 1.0),
+    normalized_fixed_ylim: tuple[float, float] | None = (0.0, 1.0),
+    normalized_autoscale_y: bool = False,
     blit_manager: "BlitManager | None" = None,
 ) -> None:
     """Update the live raw and normalized plots in one redraw pass."""
@@ -167,8 +172,11 @@ def update_live_plots(
         ax=normalized_ax,
         line=normalized_line,
         x_limits=shared_x_limits,
-        clip_range=(0.0, 1.0),
-        fixed_ylim=(0.0, 1.0),
+        clip_range=normalized_clip_range,
+        fixed_ylim=normalized_fixed_ylim,
+        autoscale_y=normalized_autoscale_y,
+        min_y_span=_RAW_MIN_Y_SPAN,
+        y_padding_ratio=_RAW_Y_PADDING_RATIO,
     )
     _update_raw_event_markers(
         raw_ax,
