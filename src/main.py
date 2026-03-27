@@ -99,6 +99,7 @@ def prompt_processing_mode(
         print("Select processing mode:", file=stream)
         print("1 = Legacy control (0..1, hold/smoothing)", file=stream)
         print("2 = Realtime movement proxy (centered, unclamped)", file=stream)
+        print("3 = Adaptive live control (rhythm-flexible)", file=stream)
         try:
             selection = input_func("Enter mode number [1]: ").strip()
         except EOFError:
@@ -110,7 +111,48 @@ def prompt_processing_mode(
             return 1, "control"
         if selection == "2":
             return 2, "movement"
-        print("Invalid selection. Enter 1 or 2.", file=stream)
+        if selection == "3":
+            return 3, "adaptive"
+        print("Invalid selection. Enter 1, 2 or 3.", file=stream)
+
+
+def _processing_mode_description(processing_mode: ProcessingMode) -> str:
+    if processing_mode == "movement":
+        return "Realtime movement proxy (centered, unclamped)"
+    if processing_mode == "adaptive":
+        return "Adaptive live control (rhythm-flexible)"
+    return "Legacy control (0..1, hold/smoothing)"
+
+
+def _plot_panel_config(processing_mode: ProcessingMode) -> tuple[str, str]:
+    if processing_mode == "movement":
+        return "Movement Proxy (Centered)", "Movement Proxy"
+    if processing_mode == "adaptive":
+        return "Adaptive Breath Level (0-1)", "Adaptive Breath Level"
+    return "Breath Level (0-1)", "Breath Level"
+
+
+def _lsl_config_for_mode(config: AppConfig, processing_mode: ProcessingMode) -> tuple[str, str, str, tuple[str, str]]:
+    if processing_mode == "movement":
+        return (
+            f"{config.lsl.stream_name}Movement",
+            "BreathingMovement",
+            f"{config.lsl.source_id}_movement",
+            ("movement_value", "event_code"),
+        )
+    if processing_mode == "adaptive":
+        return (
+            f"{config.lsl.stream_name}Adaptive",
+            "BreathingAdaptive",
+            f"{config.lsl.source_id}_adaptive",
+            ("breath_level", "event_code"),
+        )
+    return (
+        config.lsl.stream_name,
+        config.lsl.stream_type,
+        config.lsl.source_id,
+        ("breath_level", "event_code"),
+    )
 
 
 def run_acquisition(config: AppConfig) -> None:
@@ -140,11 +182,7 @@ def run_acquisition(config: AppConfig) -> None:
     print(
         "Selected mode "
         f"{selected_mode_number}: "
-        + (
-            "Legacy control (0..1, hold/smoothing)"
-            if processing_mode == "control"
-            else "Realtime movement proxy (centered, unclamped)"
-        )
+        + _processing_mode_description(processing_mode)
     )
     pipeline_cfg = PipelineConfig(
         sampling_rate_hz=config.device.sampling_rate_hz,
@@ -183,18 +221,11 @@ def run_acquisition(config: AppConfig) -> None:
 
         if config.display.enable_plot:
             setup_live_plots, update_live_plots = _import_plot_helpers()
+            normalized_title, normalized_label = _plot_panel_config(processing_mode)
             _, raw_ax, raw_line, normalized_ax, normalized_line, blit_manager = (
                 setup_live_plots(
-                    normalized_title=(
-                        "Breath Level (0-1)"
-                        if processing_mode == "control"
-                        else "Movement Proxy (Centered)"
-                    ),
-                    normalized_label=(
-                        "Breath Level"
-                        if processing_mode == "control"
-                        else "Movement Proxy"
-                    ),
+                    normalized_title=normalized_title,
+                    normalized_label=normalized_label,
                 )
             )
         else:
@@ -202,15 +233,10 @@ def run_acquisition(config: AppConfig) -> None:
 
         if config.lsl.enable:
             LSLBreathingSender = _import_lsl_sender()
-            stream_name = config.lsl.stream_name
-            stream_type = config.lsl.stream_type
-            source_id = config.lsl.source_id
-            channel_labels = ("breath_level", "event_code")
-            if processing_mode == "movement":
-                stream_name = f"{stream_name}Movement"
-                stream_type = "BreathingMovement"
-                source_id = f"{source_id}_movement"
-                channel_labels = ("movement_value", "event_code")
+            stream_name, stream_type, source_id, channel_labels = _lsl_config_for_mode(
+                config,
+                processing_mode,
+            )
             lsl_sender = LSLBreathingSender(
                 name=stream_name,
                 type=stream_type,
@@ -254,9 +280,7 @@ def run_acquisition(config: AppConfig) -> None:
 
                 if sample.stage == "runtime":
                     runtime_value = (
-                        sample.normalized_value
-                        if processing_mode == "control"
-                        else sample.movement_value
+                        sample.movement_value if processing_mode == "movement" else sample.normalized_value
                     )
                     if runtime_value is not None:
                         normalized_sample_indices.append(acquisition_sample_index)
@@ -269,10 +293,12 @@ def run_acquisition(config: AppConfig) -> None:
                             trough_raw_values.append(sample.selected_sensor_raw)
                         if lsl_sender is not None:
                             lsl_sender.send([runtime_value, sample.extrema_event_code])
-                        if processing_mode == "control":
-                            print(f"Normalized: {runtime_value:.4f}")
-                        else:
+                        if processing_mode == "movement":
                             print(f"Movement: {runtime_value:.4f}")
+                        elif processing_mode == "adaptive":
+                            print(f"Adaptive normalized: {runtime_value:.4f}")
+                        else:
+                            print(f"Normalized: {runtime_value:.4f}")
                         if sample.extrema_event_label is not None:
                             print(f"Breath event: {sample.extrema_event_label}")
                 acquisition_sample_index += 1
@@ -299,7 +325,7 @@ def run_acquisition(config: AppConfig) -> None:
                         f"max={window_max:.4f}, points={len(normalized_array)}"
                     )
                 if (
-                    processing_mode == "control"
+                    processing_mode != "movement"
                     and normalized_array.size > 0
                     and (window_min < 0.0 or window_max > 1.0)
                 ):
@@ -321,8 +347,8 @@ def run_acquisition(config: AppConfig) -> None:
                     peak_values=peak_raw_values,
                     trough_times=trough_sample_indices,
                     trough_values=trough_raw_values,
-                    normalized_clip_range=(0.0, 1.0) if processing_mode == "control" else None,
-                    normalized_fixed_ylim=(0.0, 1.0) if processing_mode == "control" else None,
+                    normalized_clip_range=(0.0, 1.0) if processing_mode != "movement" else None,
+                    normalized_fixed_ylim=(0.0, 1.0) if processing_mode != "movement" else None,
                     normalized_autoscale_y=processing_mode == "movement",
                     blit_manager=blit_manager,
                 )

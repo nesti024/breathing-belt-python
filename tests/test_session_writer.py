@@ -210,6 +210,7 @@ def test_session_writer_creates_expected_files_and_rows() -> None:
         assert stored_metadata["lsl_stream"]["channel_count"] == 2
         assert stored_metadata["lsl_stream"]["channel_names"] == ["breath_level", "event_code"]
         assert stored_metadata["movement_model"]["active"] is False
+        assert stored_metadata["adaptive_model"]["active"] is False
         assert stored_metadata["raw_qc_summary"]["event_counts"]["saturation"] == 1
     finally:
         shutil.rmtree(root_dir, ignore_errors=True)
@@ -304,8 +305,106 @@ def test_session_writer_records_movement_mode_rows_and_metadata() -> None:
         assert stored_metadata["selected_mode_number"] == 2
         assert stored_metadata["control_model"]["active"] is False
         assert stored_metadata["movement_model"]["active"] is True
+        assert stored_metadata["adaptive_model"]["active"] is False
         assert stored_metadata["movement_model"]["reference_amplitude"] == 2.0
         assert stored_metadata["lsl_stream"]["stream_name"] == "BreathingBeltMovement"
         assert stored_metadata["lsl_stream"]["channel_names"] == ["movement_value", "event_code"]
+    finally:
+        shutil.rmtree(root_dir, ignore_errors=True)
+
+
+def test_session_writer_records_adaptive_mode_rows_and_metadata() -> None:
+    config = _make_config()
+    root_dir = Path(".codex-tmp") / f"session-writer-adaptive-test-{uuid4().hex}"
+    root_dir.mkdir(parents=True, exist_ok=False)
+    try:
+        writer = SessionWriter(root_dir, config)
+
+        adaptive_sample = PipelineSample(
+            stage="runtime",
+            sample_index=0,
+            relative_time_s=0.0,
+            selected_sensor_raw=500.0,
+            filtered_value=1.8,
+            cleaned_value=1.7,
+            normalized_value=0.62,
+            is_artifact=False,
+            hold_mode_active=False,
+            adaptive_center=0.2,
+            adaptive_amplitude=2.0,
+            processing_mode="adaptive",
+            movement_value=1.5,
+            extrema_event_code=1.0,
+            extrema_event_label="inhale_peak",
+        )
+
+        writer.write_device_row(
+            "runtime",
+            0,
+            0.0,
+            np.array([0, 1, 2, 3, 4, 500, 0], dtype=float),
+        )
+        writer.write_signal_sample(adaptive_sample)
+
+        metadata = build_session_metadata(
+            config=config,
+            resolved_config_path=writer.resolved_config_path,
+            software_version="0.1.0",
+            started_at="2026-03-17T10:00:00+00:00",
+            ended_at="2026-03-17T10:01:00+00:00",
+            calibration_result=CalibrationResult(
+                global_min=-1.5,
+                global_max=1.5,
+                center=0.1,
+                amplitude=1.5,
+                y_min=-1.8,
+                y_max=1.8,
+                saturated=False,
+                n_samples=20,
+                saturated_count=0,
+                lo_idx=1,
+                hi_idx=18,
+            ),
+            adaptive_state=AdaptiveRangeState(
+                center=0.15,
+                amplitude=1.7,
+                abs_dev_ema=0.55,
+                abs_dev_to_amplitude_scale=3.1,
+            ),
+            qc_summary={
+                "event_counts": {},
+                "saturation_samples": 0,
+                "total_samples": 1,
+                "saturation_fraction": 0.0,
+                "first_event_sample_index": None,
+                "last_event_sample_index": None,
+            },
+            processing_mode="adaptive",
+            selected_mode_number=3,
+        )
+        writer.finalize(metadata)
+
+        session_dir = writer.session_dir
+        with (session_dir / "signal_trace.csv").open(
+            "r",
+            encoding="utf-8",
+            newline="",
+        ) as handle:
+            signal_rows = list(csv.DictReader(handle))
+        assert signal_rows[0]["processing_mode"] == "adaptive"
+        assert signal_rows[0]["normalized_value"] == "0.620000"
+        assert signal_rows[0]["movement_value"] == "1.500000"
+
+        stored_metadata = json.loads(
+            (session_dir / "session_metadata.json").read_text(encoding="utf-8")
+        )
+        assert stored_metadata["processing_mode"] == "adaptive"
+        assert stored_metadata["selected_mode_number"] == 3
+        assert stored_metadata["control_model"]["active"] is False
+        assert stored_metadata["movement_model"]["active"] is False
+        assert stored_metadata["adaptive_model"]["active"] is True
+        assert stored_metadata["adaptive_model"]["initial_amplitude"] == 1.5
+        assert stored_metadata["lsl_stream"]["stream_name"] == "BreathingBeltAdaptive"
+        assert stored_metadata["lsl_stream"]["channel_names"] == ["breath_level", "event_code"]
     finally:
         shutil.rmtree(root_dir, ignore_errors=True)

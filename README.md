@@ -2,21 +2,23 @@
 
 `breathing-belt-python` is a publication-oriented artifact for acquiring a live breathing-belt signal, selecting a live processing mode at startup, and exporting a reproducible session record.
 
-The runtime currently supports two live modes:
+The runtime currently supports three live modes:
 - `1`: a **normalized breathing control signal** for real-time interaction, biofeedback, or downstream synchronization
 - `2`: a **realtime movement proxy** intended to stay closer to filtered belt motion in centered sensor units
+- `3`: an **adaptive live control signal** that updates its operating range online to better follow changing breathing rhythms
 
-Neither mode is a validated respiratory-volume estimator and neither should be described as a clinical or physiological volume measurement.
+None of these modes is a validated respiratory-volume estimator, and none should be described as a clinical or physiological volume measurement.
 
 ## Scope
 
 This repository provides:
 - BITalino acquisition through a threaded reader
-- startup selection between a legacy control mode and a movement-proxy mode
+- startup selection between legacy control, movement-proxy, and adaptive live-control modes
 - percentile-based startup calibration
 - fixed-calibration mapping with padded control headroom into a continuous `0..1` breath level in control mode
 - centered movement-proxy output with causal drift removal and light smoothing in movement mode
-- inhale-peak and exhale-trough event detection in both live modes
+- adaptive center/amplitude normalization for rhythm-flexible live control
+- inhale-peak and exhale-trough event detection in all live modes
 - breath-hold output freezing near inhale/exhale extremes to minimize sphere drift during holds in control mode
 - raw-signal quality-control warnings and logging
 - live plotting and optional LSL streaming
@@ -60,9 +62,10 @@ Important config fields:
 - `device.channels`: acquired analog channels
 - `device.processed_sensor_column`: device-row column used for the normalized signal
 - `device.invert_signal`: flips the control-signal polarity when inhale/exhale direction is reversed
-- `filter.lp_*`: low-pass control filter parameters
+- `filter.lp_*`: low-pass parameters for legacy control mode and adaptive live mode
 - `movement.*`: high-pass and low-pass parameters for realtime movement-proxy mode
 - `calibration.*`: processed-signal calibration settings, including control-map headroom via `padding_ratio`
+- `adaptation.*`: runtime center/amplitude update speeds for adaptive live mode
 - `hold.*`: breath-hold freeze thresholds and the extrema-zone gate via `edge_margin_ratio`; set `hold.enabled = false` to disable hold detection for testing
 - `output_smoothing.*`: motion-adaptive damping for the emitted `0..1` control signal, including faster convergence near real extremes via `tau_extreme_s` and `edge_margin_ratio`
 - `extrema.*`: minimum interval and prominence thresholds for inhale/exhale events
@@ -90,7 +93,7 @@ breathing-belt --config config.toml
 ```
 
 During a live run:
-- choose `1` or `2` at the startup console prompt
+- choose `1`, `2`, or `3` at the startup console prompt
 - startup calibration is performed first
 - the raw signal is plotted during calibration and runtime if `display.enable_plot = true`
 - the mode-specific secondary signal is plotted after calibration
@@ -121,7 +124,7 @@ The `stage` column distinguishes `calibration` from `runtime`.
 
 ## Signal-Processing Method
 
-At startup the user selects one of two live modes.
+At startup the user selects one of three live modes.
 
 Mode `1` (`Legacy control`):
 
@@ -131,11 +134,16 @@ Mode `2` (`Realtime movement proxy`):
 
 `raw selected channel -> optional polarity inversion -> causal high-pass drift removal -> causal low-pass smoothing -> startup calibration -> centered movement output`
 
+Mode `3` (`Adaptive live control`):
+
+`raw selected channel -> optional polarity inversion -> low-pass filter -> startup calibration -> adaptive center/amplitude update -> emitted 0..1 breath level`
+
 Calibration:
-- runs on the processed signal in both modes
+- runs on the processed signal in all modes
 - uses percentile bounds (`percentile_lo`, `percentile_hi`)
 - estimates a fixed control map for mode `1`
 - estimates a fixed center and reference amplitude for mode `2`
+- seeds the initial adaptive operating range for mode `3`
 
 Runtime control mode:
 - uses the fixed startup calibration for the entire run
@@ -150,11 +158,19 @@ Runtime movement mode:
 - does not apply padded control mapping, hold freezing, or output smoothing
 - still emits `1.0` on inhale peaks and `-1.0` on exhale troughs
 
+Runtime adaptive mode:
+- emits a bounded `0..1` control level while updating center and amplitude online
+- uses `adaptation.startup_*` time constants during the startup adaptation window and `adaptation.center_tau_s` / `adaptation.amplitude_tau_s` afterward
+- does not apply hold freezing or motion-adaptive output smoothing
+- also exports a centered `movement_value` trace derived from the current adaptive center
+- still emits `1.0` on inhale peaks and `-1.0` on exhale troughs
+
 By default, the local `config.toml` keeps `hold.enabled = false` and relies on `output_smoothing` as the primary anti-drift mechanism for testing.
 
 LSL:
 - mode `1` publishes two float32 channels by default: `breath_level` and `event_code`
 - mode `2` publishes a separate stream identity with `movement_value` and `event_code`
+- mode `3` publishes a separate stream identity with `breath_level` and `event_code`
 - `event_code` is `0.0` during normal samples, `1.0` for inhale peaks, and `-1.0` for exhale troughs
 
 ## Raw Quality Control
@@ -171,10 +187,10 @@ QC policy is advisory:
 
 ## Limitations and Non-Claims
 
-- The normalized control output and the movement-proxy output are both filtered proxies, not validated respiratory-volume estimates.
+- The normalized control output, adaptive live output, and movement-proxy output are all filtered proxies, not validated respiratory-volume estimates.
 - Belt placement, posture, slack, and motion can materially affect the signal.
 - The method currently processes one configured sensor column for normalization, even if multiple channels are acquired and exported.
-- The deprecated `filter.hp_*`, `artifact.*`, and `adaptation.*` settings remain loadable for compatibility but are not used by the fixed-calibration VR control path.
+- The deprecated `filter.hp_*` and `artifact.*` settings remain loadable for compatibility and are not used by the fixed-calibration VR control path.
 - The code is intended for reproducible research workflows, not medical use.
 
 ## Tests

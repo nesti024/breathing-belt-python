@@ -14,7 +14,9 @@ from .calibration import (
     AdaptiveRangeState,
     CalibrationConfig,
     CalibrationResult,
+    initialize_adaptive_range,
     run_range_calibration,
+    update_adaptive_range,
 )
 from .preprocessing import (
     get_high_pass_filter_coeffs,
@@ -37,7 +39,7 @@ from .settings import (
 
 
 _HOLD_RELEASE_DRIFT = 0.03
-ProcessingMode = Literal["control", "movement"]
+ProcessingMode = Literal["control", "movement", "adaptive"]
 
 
 @dataclass(frozen=True)
@@ -237,16 +239,31 @@ def process_device_row(
                     state.calibration_samples,
                     cfg,
                 )
+                state.adaptive_state = _build_fixed_reference_state(
+                    state.calibration_samples,
+                    state.calibration_result,
+                    cfg.calibration.amplitude_floor,
+                )
+            elif cfg.processing_mode == "adaptive":
+                state.calibration_result = run_range_calibration(
+                    state.calibration_samples,
+                    cfg.calibration_cfg,
+                )
+                state.adaptive_state = initialize_adaptive_range(
+                    state.calibration_samples,
+                    state.calibration_result,
+                    cfg.adaptive_cfg_startup,
+                )
             else:
                 state.calibration_result = run_range_calibration(
                     state.calibration_samples,
                     cfg.calibration_cfg,
                 )
-            state.adaptive_state = _build_fixed_reference_state(
-                state.calibration_samples,
-                state.calibration_result,
-                cfg.calibration.amplitude_floor,
-            )
+                state.adaptive_state = _build_fixed_reference_state(
+                    state.calibration_samples,
+                    state.calibration_result,
+                    cfg.calibration.amplitude_floor,
+                )
             adaptive_center = float(state.adaptive_state.center)
             adaptive_amplitude = float(state.adaptive_state.amplitude)
             if cfg.processing_mode == "movement":
@@ -259,6 +276,18 @@ def process_device_row(
                             f"reference_amplitude={state.calibration_result.amplitude:.6f}, "
                             f"percentile_lo={state.calibration_result.global_min:.6f}, "
                             f"percentile_hi={state.calibration_result.global_max:.6f}"
+                        ),
+                    ]
+                )
+            elif cfg.processing_mode == "adaptive":
+                messages.extend(
+                    [
+                        "Adaptive calibration complete.",
+                        (
+                            "Adaptive range initialized: "
+                            f"center={state.adaptive_state.center:.6f}, "
+                            f"amplitude={state.adaptive_state.amplitude:.6f}, "
+                            f"startup_duration_s={cfg.adaptation.startup_duration_s:.1f}"
                         ),
                     ]
                 )
@@ -297,6 +326,19 @@ def process_device_row(
     else:
         if cfg.processing_mode == "movement":
             movement_value = _compute_runtime_movement_value(cleaned_value, state)
+            extrema_event_code, extrema_event_label = _detect_runtime_extremum(
+                movement_value,
+                sample_index,
+                state,
+                cfg,
+            )
+        elif cfg.processing_mode == "adaptive":
+            normalized_value, movement_value = _normalize_runtime_adaptive_sample(
+                cleaned_value,
+                is_artifact,
+                state,
+                cfg,
+            )
             extrema_event_code, extrema_event_label = _detect_runtime_extremum(
                 movement_value,
                 sample_index,
@@ -485,6 +527,32 @@ def _compute_runtime_movement_value(
     return float(cleaned_value - state.calibration_result.center)
 
 
+def _normalize_runtime_adaptive_sample(
+    cleaned_value: float,
+    is_artifact: bool,
+    state: PipelineState,
+    cfg: PipelineConfig,
+) -> tuple[float, float]:
+    del is_artifact
+    if state.adaptive_state is None:
+        raise RuntimeError("Adaptive state must be initialized before adaptive normalization.")
+
+    current_state = state.adaptive_state
+    movement_value = float(cleaned_value - current_state.center)
+    in_startup = state.runtime_processed_samples < cfg.startup_target_samples
+    state.startup_mode_active = in_startup
+    adaptive_cfg = cfg.adaptive_cfg_startup if in_startup else cfg.adaptive_cfg_runtime
+    normalized_value, state.adaptive_state = update_adaptive_range(
+        x=float(cleaned_value),
+        state=current_state,
+        cfg=adaptive_cfg,
+        allow_update=cfg.adaptation.center_enabled or cfg.adaptation.amplitude_enabled,
+        allow_center_update=cfg.adaptation.center_enabled,
+        allow_amplitude_update=cfg.adaptation.amplitude_enabled,
+    )
+    return float(normalized_value), movement_value
+
+
 def _map_control_level(
     value: float,
     calibration_result: CalibrationResult,
@@ -585,7 +653,11 @@ def _detect_runtime_extremum(
         cfg.calibration.amplitude_floor,
         cfg.extrema.prominence_ratio * max(state.adaptive_state.amplitude, cfg.calibration.amplitude_floor),
     )
-    baseline_value = 0.0 if cfg.processing_mode == "movement" else state.adaptive_state.center
+    baseline_value = (
+        0.0
+        if cfg.processing_mode in {"movement", "adaptive"}
+        else state.adaptive_state.center
+    )
 
     if state.previous_delta_sign > 0 and delta <= 0.0:
         if _extremum_interval_elapsed(candidate_index, state, cfg):

@@ -693,6 +693,120 @@ def test_pipeline_movement_mode_invert_signal_flips_movement_direction() -> None
     )
 
 
+def test_pipeline_adaptive_mode_outputs_bounded_control_and_centered_movement() -> None:
+    cfg = _make_pipeline_config(
+        calibration_duration_s=5.0,
+        processing_mode="adaptive",
+        adaptation=AdaptationSettings(
+            center_enabled=True,
+            amplitude_enabled=True,
+            center_tau_s=8.0,
+            amplitude_tau_s=1.0,
+            startup_duration_s=0.5,
+            startup_center_tau_s=0.2,
+            startup_amplitude_tau_s=0.2,
+        ),
+    )
+    values = np.concatenate(
+        [
+            _make_breathing_values(cfg.calibration_target_samples, amplitude=20.0),
+            _make_breathing_values(500, amplitude=25.0),
+        ]
+    )
+
+    samples, state = _replay(values, cfg)
+
+    runtime_samples = [sample for sample in samples if sample.stage == "runtime"]
+    normalized = np.array(
+        [sample.normalized_value for sample in runtime_samples if sample.normalized_value is not None],
+        dtype=float,
+    )
+    movement = np.array(
+        [sample.movement_value for sample in runtime_samples if sample.movement_value is not None],
+        dtype=float,
+    )
+
+    assert state.calibration_result is not None
+    assert state.adaptive_state is not None
+    assert runtime_samples[0].normalized_value is not None
+    assert runtime_samples[0].movement_value is not None
+    assert all(not sample.hold_mode_active for sample in runtime_samples)
+    assert np.all(normalized >= 0.0)
+    assert np.all(normalized <= 1.0)
+    assert float(np.min(movement)) < 0.0
+    assert float(np.max(movement)) > 0.0
+
+
+def test_pipeline_adaptive_mode_updates_amplitude_for_changed_breathing_range() -> None:
+    cfg = _make_pipeline_config(
+        calibration_duration_s=5.0,
+        processing_mode="adaptive",
+        adaptation=AdaptationSettings(
+            center_enabled=True,
+            amplitude_enabled=True,
+            center_tau_s=10.0,
+            amplitude_tau_s=0.8,
+            startup_duration_s=0.5,
+            startup_center_tau_s=0.2,
+            startup_amplitude_tau_s=0.2,
+        ),
+    )
+    calibration_values = _make_breathing_values(cfg.calibration_target_samples, amplitude=18.0)
+    runtime_low = _make_breathing_values(120, amplitude=18.0)
+    runtime_high = _make_breathing_values(320, amplitude=60.0)
+    samples, state = _replay(
+        np.concatenate([calibration_values, runtime_low, runtime_high]),
+        cfg,
+    )
+
+    runtime_samples = [sample for sample in samples if sample.stage == "runtime"]
+    amplitudes = np.array(
+        [sample.adaptive_amplitude for sample in runtime_samples if sample.adaptive_amplitude is not None],
+        dtype=float,
+    )
+
+    assert state.adaptive_state is not None
+    assert amplitudes.size > 0
+    assert float(np.median(amplitudes[-60:])) > float(np.median(amplitudes[:60])) * 1.3
+
+
+def test_pipeline_adaptive_mode_invert_signal_flips_centered_movement_direction() -> None:
+    normal_cfg = _make_pipeline_config(
+        calibration_duration_s=5.0,
+        processing_mode="adaptive",
+        invert_signal=False,
+    )
+    inverted_cfg = _make_pipeline_config(
+        calibration_duration_s=5.0,
+        processing_mode="adaptive",
+        invert_signal=True,
+    )
+    values = np.concatenate(
+        [
+            _make_breathing_values(normal_cfg.calibration_target_samples, amplitude=20.0),
+            _make_breathing_values(400, amplitude=25.0),
+        ]
+    )
+
+    normal_samples, _ = _replay(values, normal_cfg)
+    inverted_samples, _ = _replay(values, inverted_cfg)
+    normal_movement = np.array(
+        [sample.movement_value for sample in normal_samples if sample.movement_value is not None],
+        dtype=float,
+    )
+    inverted_movement = np.array(
+        [sample.movement_value for sample in inverted_samples if sample.movement_value is not None],
+        dtype=float,
+    )
+
+    compare_slice = slice(50, None)
+    assert np.allclose(
+        normal_movement[compare_slice],
+        -inverted_movement[compare_slice],
+        atol=0.75,
+    )
+
+
 def test_pipeline_emits_inhale_and_exhale_events_for_breath_cycles() -> None:
     cfg = _make_pipeline_config(extrema=ExtremaConfig(min_interval_ms=600, prominence_ratio=0.05))
     values = np.concatenate(
@@ -715,6 +829,27 @@ def test_pipeline_movement_mode_emits_inhale_and_exhale_events_for_breath_cycles
     cfg = _make_pipeline_config(
         calibration_duration_s=5.0,
         processing_mode="movement",
+        extrema=ExtremaConfig(min_interval_ms=600, prominence_ratio=0.05),
+    )
+    values = np.concatenate(
+        [
+            _make_breathing_values(cfg.calibration_target_samples, amplitude=20.0),
+            _make_breathing_values(800, amplitude=25.0),
+        ]
+    )
+    samples, _ = _replay(values, cfg)
+
+    runtime_samples = [sample for sample in samples if sample.stage == "runtime"]
+    labels = [sample.extrema_event_label for sample in runtime_samples if sample.extrema_event_label is not None]
+
+    assert "inhale_peak" in labels
+    assert "exhale_trough" in labels
+
+
+def test_pipeline_adaptive_mode_emits_inhale_and_exhale_events_for_breath_cycles() -> None:
+    cfg = _make_pipeline_config(
+        calibration_duration_s=5.0,
+        processing_mode="adaptive",
         extrema=ExtremaConfig(min_interval_ms=600, prominence_ratio=0.05),
     )
     values = np.concatenate(

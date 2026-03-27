@@ -35,6 +35,17 @@ def test_prompt_processing_mode_accepts_movement_choice() -> None:
     assert processing_mode == "movement"
 
 
+def test_prompt_processing_mode_accepts_adaptive_choice() -> None:
+    output = io.StringIO()
+    selected_mode, processing_mode = prompt_processing_mode(
+        input_func=lambda _: "3",
+        output_stream=output,
+    )
+
+    assert selected_mode == 3
+    assert processing_mode == "adaptive"
+
+
 def test_prompt_processing_mode_retries_after_invalid_input() -> None:
     answers = iter(["9", "1"])
     output = io.StringIO()
@@ -45,7 +56,7 @@ def test_prompt_processing_mode_retries_after_invalid_input() -> None:
 
     assert selected_mode == 1
     assert processing_mode == "control"
-    assert "Invalid selection. Enter 1 or 2." in output.getvalue()
+    assert "Invalid selection. Enter 1, 2 or 3." in output.getvalue()
 
 
 def test_prompt_processing_mode_defaults_to_control_on_empty_or_eof() -> None:

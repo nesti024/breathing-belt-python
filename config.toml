@@ -28,8 +28,16 @@ source_id = "breathingbelt001"
 # by the fixed-calibration VR control path.
 hp_cutoff_hz = 0.005
 hp_order = 1
-lp_cutoff_hz = 1.5
+lp_cutoff_hz = 0.8
 lp_order = 2
+
+[movement]
+hp_cutoff_hz = 0.002
+hp_order = 1
+lp_cutoff_hz = 0.8
+lp_order = 2
+
+
 
 [artifact]
 # Artifact suppression settings are retained for backward compatibility and are
@@ -50,31 +58,30 @@ padding_ratio = 0.20
 # are not used by the fixed-calibration VR control path.
 center_enabled = true
 amplitude_enabled = true
-center_tau_s = 600.0
-amplitude_tau_s = 120.0
-startup_duration_s = 60.0
-startup_center_tau_s = 25.0
-startup_amplitude_tau_s = 25.0
+center_tau_s = 1200.0
+amplitude_tau_s = 300.0
+startup_duration_s = 15.0
+startup_center_tau_s = 60.0
+startup_amplitude_tau_s = 60.0
 
 [hold]
-enabled = false
-activity_window_ms = 500
-ratio_per_sec_enter = 1.0
-ratio_per_sec_exit = 1.5
+enabled = true
+activity_window_ms = 800
+ratio_per_sec_enter = 1.5
+ratio_per_sec_exit = 2.2
 floor_per_sec = 0.01
-# Only the top/bottom edge zones are eligible for hold freeze.
-edge_margin_ratio = 0.20
+edge_margin_ratio = 0.25
 
 [output_smoothing]
 enabled = true
-activity_window_ms = 500
+activity_window_ms = 800
 tau_active_s = 0.25
-tau_extreme_s = 0.75
-tau_hold_s = 5.0
+tau_extreme_s = 1.0
+tau_hold_s = 8.0
 activity_low_ratio_per_sec = 0.10
 activity_high_ratio_per_sec = 0.50
 activity_floor_per_sec = 0.01
-edge_margin_ratio = 0.10
+edge_margin_ratio = 0.15
 
 [extrema]
 min_interval_ms = 800

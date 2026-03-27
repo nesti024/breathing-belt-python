@@ -24,7 +24,8 @@ source_id = "breathingbelt001"
 
 [filter]
 # High-pass parameters are retained for backward compatibility and are ignored
-# by the fixed-calibration VR control path.
+# by the fixed-calibration VR control path. The low-pass settings are used by
+# legacy control mode and adaptive live mode.
 hp_cutoff_hz = 0.005
 hp_order = 1
 lp_cutoff_hz = 1.5
@@ -53,8 +54,8 @@ amplitude_floor = 0.001
 padding_ratio = 0.20
 
 [adaptation]
-# Adaptive normalization settings are retained for backward compatibility and
-# are not used by the fixed-calibration VR control path.
+# Adaptive live mode uses these settings to update center and amplitude during
+# runtime. The fixed-calibration control path still ignores them.
 center_enabled = true
 amplitude_enabled = true
 center_tau_s = 600.0
