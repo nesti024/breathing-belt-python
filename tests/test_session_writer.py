@@ -9,6 +9,7 @@ import shutil
 from uuid import uuid4
 
 import numpy as np
+import pytest
 
 from src.calibration import AdaptiveRangeState, CalibrationResult
 from src.pipeline import PipelineSample
@@ -35,12 +36,26 @@ def _make_config() -> AppConfig:
     )
 
 
+def _device_sample_width(config: AppConfig) -> int:
+    return 5 + len(config.device.channels)
+
+
 def test_session_writer_creates_expected_files_and_rows() -> None:
     config = _make_config()
     root_dir = Path(".codex-tmp") / f"session-writer-test-{uuid4().hex}"
     root_dir.mkdir(parents=True, exist_ok=False)
     try:
-        writer = SessionWriter(root_dir, config)
+        writer = SessionWriter(
+            root_dir,
+            config,
+            device_sample_width=_device_sample_width(config),
+        )
+
+        device_path = writer.session_dir / "device_samples.csv"
+        assert device_path.exists()
+        assert device_path.read_text(encoding="utf-8").splitlines() == [
+            "stage,sample_index,relative_time_s,device_col_0,device_col_1,device_col_2,device_col_3,device_col_4,device_col_5,device_col_6"
+        ]
 
         calibration_sample = PipelineSample(
             stage="calibration",
@@ -217,12 +232,89 @@ def test_session_writer_creates_expected_files_and_rows() -> None:
         shutil.rmtree(root_dir, ignore_errors=True)
 
 
+def test_session_writer_keeps_header_only_raw_file_when_no_samples_are_written() -> None:
+    config = _make_config()
+    root_dir = Path(".codex-tmp") / f"session-writer-empty-raw-test-{uuid4().hex}"
+    root_dir.mkdir(parents=True, exist_ok=False)
+    try:
+        writer = SessionWriter(
+            root_dir,
+            config,
+            device_sample_width=_device_sample_width(config),
+        )
+        session_dir = writer.session_dir
+        writer.close()
+
+        device_path = session_dir / "device_samples.csv"
+        assert device_path.exists()
+        assert device_path.read_text(encoding="utf-8").splitlines() == [
+            "stage,sample_index,relative_time_s,device_col_0,device_col_1,device_col_2,device_col_3,device_col_4,device_col_5,device_col_6"
+        ]
+    finally:
+        shutil.rmtree(root_dir, ignore_errors=True)
+
+
+def test_session_writer_rejects_raw_row_width_mismatch() -> None:
+    config = _make_config()
+    root_dir = Path(".codex-tmp") / f"session-writer-width-test-{uuid4().hex}"
+    root_dir.mkdir(parents=True, exist_ok=False)
+    try:
+        writer = SessionWriter(
+            root_dir,
+            config,
+            device_sample_width=_device_sample_width(config),
+        )
+
+        with pytest.raises(ValueError, match="expected 7, observed 6"):
+            writer.write_device_row(
+                "runtime",
+                0,
+                0.0,
+                np.array([0, 1, 2, 3, 4, 500], dtype=float),
+            )
+
+        writer.close()
+    finally:
+        shutil.rmtree(root_dir, ignore_errors=True)
+
+
+def test_session_writer_flush_raw_fsyncs_device_file(monkeypatch) -> None:
+    config = _make_config()
+    root_dir = Path(".codex-tmp") / f"session-writer-flush-test-{uuid4().hex}"
+    root_dir.mkdir(parents=True, exist_ok=False)
+    try:
+        writer = SessionWriter(
+            root_dir,
+            config,
+            device_sample_width=_device_sample_width(config),
+        )
+        fsync_calls: list[int] = []
+        monkeypatch.setattr("src.session_writer.os.fsync", lambda fd: fsync_calls.append(fd))
+
+        writer.write_device_row(
+            "runtime",
+            0,
+            0.0,
+            np.array([0, 1, 2, 3, 4, 500, 0], dtype=float),
+        )
+        writer.flush_raw()
+
+        assert fsync_calls == [writer._device_file.fileno()]
+        writer.close()
+    finally:
+        shutil.rmtree(root_dir, ignore_errors=True)
+
+
 def test_session_writer_records_movement_mode_rows_and_metadata() -> None:
     config = _make_config()
     root_dir = Path(".codex-tmp") / f"session-writer-movement-test-{uuid4().hex}"
     root_dir.mkdir(parents=True, exist_ok=False)
     try:
-        writer = SessionWriter(root_dir, config)
+        writer = SessionWriter(
+            root_dir,
+            config,
+            device_sample_width=_device_sample_width(config),
+        )
 
         movement_sample = PipelineSample(
             stage="runtime",
@@ -321,7 +413,11 @@ def test_session_writer_records_adaptive_mode_rows_and_metadata() -> None:
     root_dir = Path(".codex-tmp") / f"session-writer-adaptive-test-{uuid4().hex}"
     root_dir.mkdir(parents=True, exist_ok=False)
     try:
-        writer = SessionWriter(root_dir, config)
+        writer = SessionWriter(
+            root_dir,
+            config,
+            device_sample_width=_device_sample_width(config),
+        )
 
         adaptive_sample = PipelineSample(
             stage="runtime",

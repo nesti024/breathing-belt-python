@@ -6,6 +6,7 @@ from csv import DictWriter
 from dataclasses import asdict
 from datetime import datetime
 import json
+import os
 from pathlib import Path
 from typing import Any
 
@@ -19,13 +20,31 @@ from .settings import AppConfig, write_config_toml
 class SessionWriter:
     """Write raw, processed, and metadata artifacts for one acquisition run."""
 
-    def __init__(self, root_dir: str | Path, config: AppConfig) -> None:
+    def __init__(
+        self,
+        root_dir: str | Path,
+        config: AppConfig,
+        *,
+        device_sample_width: int,
+    ) -> None:
         timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
         self.session_dir = Path(root_dir) / timestamp
         self.session_dir.mkdir(parents=True, exist_ok=False)
+        self._device_sample_width = int(device_sample_width)
+        if self._device_sample_width <= 0:
+            raise ValueError("device_sample_width must be positive.")
 
-        self._device_file = None
-        self._device_writer: DictWriter[str] | None = None
+        device_columns = [f"device_col_{idx}" for idx in range(self._device_sample_width)]
+        self._device_file = (self.session_dir / "device_samples.csv").open(
+            "w",
+            newline="",
+            encoding="utf-8",
+        )
+        self._device_writer = DictWriter(
+            self._device_file,
+            fieldnames=["stage", "sample_index", "relative_time_s", *device_columns],
+        )
+        self._device_writer.writeheader()
         self._signal_file = (self.session_dir / "signal_trace.csv").open("w", newline="", encoding="utf-8")
         self._signal_writer = DictWriter(
             self._signal_file,
@@ -64,6 +83,7 @@ class SessionWriter:
         self.resolved_config_path = self.session_dir / "resolved_config.toml"
         write_config_toml(self.resolved_config_path, config)
         self.metadata_path = self.session_dir / "session_metadata.json"
+        self.flush_raw()
 
     def write_device_row(
         self,
@@ -75,18 +95,11 @@ class SessionWriter:
         """Append one raw device row to the session export."""
 
         row_array = np.asarray(device_row, dtype=float).reshape(-1)
-        if self._device_writer is None:
-            device_columns = [f"device_col_{idx}" for idx in range(row_array.size)]
-            self._device_file = (self.session_dir / "device_samples.csv").open(
-                "w",
-                newline="",
-                encoding="utf-8",
+        if row_array.size != self._device_sample_width:
+            raise ValueError(
+                "Raw device row width does not match expected export width: "
+                f"expected {self._device_sample_width}, observed {row_array.size}."
             )
-            self._device_writer = DictWriter(
-                self._device_file,
-                fieldnames=["stage", "sample_index", "relative_time_s", *device_columns],
-            )
-            self._device_writer.writeheader()
 
         row_payload = {
             "stage": stage,
@@ -95,6 +108,14 @@ class SessionWriter:
         }
         row_payload.update({f"device_col_{idx}": value for idx, value in enumerate(row_array)})
         self._device_writer.writerow(row_payload)
+
+    def flush_raw(self) -> None:
+        """Flush and fsync the raw device export so completed chunks are durable."""
+
+        if self._device_file is None:
+            return
+        self._device_file.flush()
+        os.fsync(self._device_file.fileno())
 
     def write_signal_sample(self, sample: PipelineSample) -> None:
         """Append one processed pipeline sample to the signal trace export."""

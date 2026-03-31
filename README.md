@@ -23,6 +23,7 @@ This repository provides:
 - raw-signal quality-control warnings and logging
 - live plotting and optional LSL streaming
 - automatic per-run export of raw rows, derived signals, QC events, and metadata
+- unconditional raw device export to `device_samples.csv` from session start, with chunk-level durability
 
 This repository does not provide:
 - a validated tidal-volume estimator
@@ -66,7 +67,7 @@ Important config fields:
 - `movement.*`: high-pass and low-pass parameters for realtime movement-proxy mode, with optional low-activity drift slowdown
 - `calibration.*`: processed-signal calibration settings, including control-map headroom via `padding_ratio`
 - `adaptation.*`: runtime center/amplitude update speeds and low-activity gating for adaptive live mode
-- `hold.*`: breath-hold freeze thresholds and the extrema-zone gate via `edge_margin_ratio`; set `hold.enabled = false` to disable hold detection for testing
+- `hold.*`: breath-hold freeze thresholds and the extrema-zone gate via `edge_margin_ratio`; set `hold.enabled = false` to disable hold freezing in legacy control mode
 - `output_smoothing.*`: motion-adaptive damping for the emitted `0..1` control signal, including faster convergence near real extremes via `tau_extreme_s` and `edge_margin_ratio`
 - `extrema.*`: minimum interval and prominence thresholds for inhale/exhale events
 - `raw_qc.*`: raw-signal clipping, flatline, and baseline-shift thresholds
@@ -116,7 +117,7 @@ runs/<timestamp>/
 File contents:
 - `resolved_config.toml`: exact config used for the run
 - `session_metadata.json`: session timestamps, software version, fixed calibration details, stream metadata, QC summary, and channel selection
-- `device_samples.csv`: full device rows with `stage`, `sample_index`, and `relative_time_s`
+- `device_samples.csv`: full device rows with `stage`, `sample_index`, and `relative_time_s`; created immediately when the session export starts and flushed to disk after each acquired chunk
 - `signal_trace.csv`: filtered control values, normalized output, hold/freeze state, and inhale/exhale event codes
 - `qc_events.csv`: one logged QC event per continuous clipping, flatline, or baseline-shift episode
 
@@ -151,13 +152,13 @@ Runtime control mode:
 - optionally freezes the emitted `0..1` value during low-activity breath holds near the top or bottom `edge_margin_ratio` of the range
 - releases freeze immediately when motion resumes or the live control value drifts away from the frozen value
 - applies motion-adaptive smoothing to the final emitted `0..1` value: fast when breathing is active, slow when activity is low, and faster again near the bottom/top `edge_margin_ratio` of the range so real extremes remain reachable
-- emits `1.0` on inhale peaks and `-1.0` on exhale troughs
+- emits a continuous `0..1` breath level and reports inhale/exhale events separately via `event_code`
 
 Runtime movement-proxy mode:
 - outputs centered filtered sensor units rather than a normalized `0..1` control level
 - does not apply padded control mapping, hold freezing, or output smoothing
 - can optionally slow its visible recentering during very low activity through `movement.low_activity_*`
-- still emits `1.0` on inhale peaks and `-1.0` on exhale troughs
+- still reports inhale/exhale events separately via `event_code`
 
 Runtime adaptive mode:
 - emits a bounded `0..1` control level while updating center and amplitude online
@@ -165,9 +166,7 @@ Runtime adaptive mode:
 - can pause center/amplitude adaptation during very low activity through `adaptation.low_activity_*`
 - does not apply hold freezing or motion-adaptive output smoothing
 - also exports a centered `movement_value` trace derived from the current adaptive center
-- still emits `1.0` on inhale peaks and `-1.0` on exhale troughs
-
-By default, the local `config.toml` keeps `hold.enabled = false` and relies on `output_smoothing` as the primary anti-drift mechanism for testing.
+- still reports inhale/exhale events separately via `event_code`
 
 LSL:
 - mode `1` publishes two float32 channels by default: `breath_level` and `event_code`

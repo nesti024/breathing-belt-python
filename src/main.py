@@ -201,6 +201,7 @@ def run_acquisition(config: AppConfig) -> None:
     )
     pipeline_state = create_pipeline_state(pipeline_cfg)
     session_started_at = datetime.now().astimezone().isoformat()
+    device_sample_width = 5 + len(config.device.channels)
 
     try:
         print("Starting acquisition...")
@@ -217,7 +218,11 @@ def run_acquisition(config: AppConfig) -> None:
         )
         belt.start()
 
-        session_writer = SessionWriter(config.output.root_dir, config)
+        session_writer = SessionWriter(
+            config.output.root_dir,
+            config,
+            device_sample_width=device_sample_width,
+        )
 
         if config.display.enable_plot:
             setup_live_plots, update_live_plots = _import_plot_helpers()
@@ -318,6 +323,7 @@ def run_acquisition(config: AppConfig) -> None:
                         if sample.extrema_event_label is not None:
                             print(f"Breath event: {sample.extrema_event_label}")
                 acquisition_sample_index += 1
+            session_writer.flush_raw()
 
             if config.display.enable_plot and raw_signal and update_live_plots is not None:
                 if normalized_signal:
