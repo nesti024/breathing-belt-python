@@ -216,3 +216,183 @@ def test_run_acquisition_flushes_raw_export_once_per_chunk(monkeypatch) -> None:
     assert writer.device_sample_width == 7
     assert len(writer.device_rows) == 2
     assert writer.flush_calls == 1
+
+
+def test_run_acquisition_limits_live_plot_history_to_configured_window(monkeypatch) -> None:
+    defaults = default_config()
+    config = AppConfig(
+        device=defaults.device.__class__(
+            mac_address="00:00:00:00:00:00",
+            chunk_size=8,
+        ),
+        display=defaults.display.__class__(
+            enable_plot=True,
+            plot_window_length=3,
+            debug_plot_window_bounds=False,
+        ),
+        lsl=defaults.lsl.__class__(
+            enable=False,
+            stream_name=defaults.lsl.stream_name,
+            stream_type=defaults.lsl.stream_type,
+            source_id=defaults.lsl.source_id,
+        ),
+        filter=defaults.filter,
+        movement=defaults.movement,
+        calibration=defaults.calibration,
+        adaptation=defaults.adaptation,
+        hold=defaults.hold,
+        output_smoothing=defaults.output_smoothing,
+        extrema=defaults.extrema,
+        raw_qc=defaults.raw_qc,
+        output=defaults.output.__class__(root_dir="ignored-in-test"),
+    )
+
+    class FakeBelt:
+        def __init__(self, **_: object) -> None:
+            self._reads = 0
+
+        def start(self) -> None:
+            return None
+
+        def get_all(self) -> np.ndarray:
+            self._reads += 1
+            if self._reads == 1:
+                rows = []
+                for sample_index in range(8):
+                    rows.append([sample_index, 1, 2, 3, 4, 500 + sample_index, 0])
+                return np.asarray(rows, dtype=float)
+            return np.empty((0, 7), dtype=float)
+
+        def stop(self) -> None:
+            return None
+
+    class FakeSessionWriter:
+        def __init__(
+            self,
+            root_dir: str,
+            app_config: AppConfig,
+            *,
+            device_sample_width: int,
+        ) -> None:
+            self.root_dir = root_dir
+            self.app_config = app_config
+            self.device_sample_width = device_sample_width
+            self.resolved_config_path = Path("resolved_config.toml")
+
+        def write_device_row(
+            self,
+            stage: str,
+            sample_index: int,
+            relative_time_s: float,
+            device_row: np.ndarray,
+        ) -> None:
+            del stage, sample_index, relative_time_s, device_row
+
+        def write_signal_sample(self, sample: PipelineSample) -> None:
+            del sample
+
+        def write_qc_event(self, event: object) -> None:
+            del event
+
+        def flush_raw(self) -> None:
+            return None
+
+        def finalize(self, metadata: dict[str, object]) -> None:
+            self.metadata = metadata
+
+    plot_call: dict[str, list[float] | list[int]] = {}
+
+    def fake_setup_live_plots(**_: object) -> tuple[None, object, object, object, object, None]:
+        return None, object(), object(), object(), object(), None
+
+    def fake_update_live_plots(
+        raw_channel_data,
+        raw_time,
+        normalized_channel_data,
+        normalized_time,
+        *,
+        raw_ax,
+        raw_line,
+        normalized_ax,
+        normalized_line,
+        peak_times,
+        peak_values,
+        trough_times,
+        trough_values,
+        normalized_clip_range,
+        normalized_fixed_ylim,
+        normalized_autoscale_y,
+        blit_manager,
+    ) -> None:
+        del (
+            raw_ax,
+            raw_line,
+            normalized_ax,
+            normalized_line,
+            peak_values,
+            trough_values,
+            normalized_clip_range,
+            normalized_fixed_ylim,
+            normalized_autoscale_y,
+            blit_manager,
+        )
+        plot_call["raw_signal"] = list(raw_channel_data)
+        plot_call["raw_time"] = list(raw_time)
+        plot_call["normalized_signal"] = list(normalized_channel_data)
+        plot_call["normalized_time"] = list(normalized_time)
+        plot_call["peak_times"] = list(peak_times)
+        plot_call["trough_times"] = list(trough_times)
+
+    def fake_process_device_row(
+        row: np.ndarray,
+        state: object,
+        cfg: object,
+    ) -> tuple[PipelineSample, object]:
+        del cfg
+        sample_index = int(row[0])
+        event_code = 1.0 if sample_index % 2 == 0 else -1.0
+        event_label = "inhale_peak" if event_code > 0.0 else "exhale_trough"
+        return (
+            PipelineSample(
+                stage="runtime",
+                sample_index=sample_index,
+                relative_time_s=sample_index / 100.0,
+                selected_sensor_raw=float(row[5]),
+                filtered_value=float(row[5]),
+                cleaned_value=float(row[5]),
+                normalized_value=0.1 * (sample_index + 1),
+                is_artifact=False,
+                hold_mode_active=False,
+                adaptive_center=None,
+                adaptive_amplitude=None,
+                extrema_event_code=event_code,
+                extrema_event_label=event_label,
+            ),
+            state,
+        )
+
+    pressed = iter([False, True])
+    fake_keyboard = SimpleNamespace(is_pressed=lambda _: next(pressed))
+
+    monkeypatch.setitem(sys.modules, "keyboard", fake_keyboard)
+    monkeypatch.setattr(main_module, "prompt_processing_mode", lambda: (1, "control"))
+    monkeypatch.setattr(main_module, "_import_breath_belt", lambda: FakeBelt)
+    monkeypatch.setattr(main_module, "_import_plot_helpers", lambda: (fake_setup_live_plots, fake_update_live_plots))
+    monkeypatch.setattr(main_module, "SessionWriter", FakeSessionWriter)
+    monkeypatch.setattr(
+        main_module,
+        "create_pipeline_state",
+        lambda _: SimpleNamespace(calibration_result=None, adaptive_state=None, qc_state=None),
+    )
+    monkeypatch.setattr(main_module, "process_device_row", fake_process_device_row)
+    monkeypatch.setattr(main_module, "raw_qc_summary", lambda _: {})
+    monkeypatch.setattr(main_module, "build_session_metadata", lambda **_: {})
+
+    main_module.run_acquisition(config)
+
+    assert plot_call["raw_signal"] == [505.0, 506.0, 507.0]
+    assert plot_call["raw_time"] == [5, 6, 7]
+    assert np.allclose(plot_call["normalized_signal"], [0.6, 0.7, 0.8])
+    assert plot_call["normalized_time"] == [5, 6, 7]
+    assert plot_call["peak_times"] == [2, 4, 6]
+    assert plot_call["trough_times"] == [3, 5, 7]

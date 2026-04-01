@@ -14,7 +14,7 @@ invert_signal = false
 
 [display]
 enable_plot = true
-plot_window_length = 200
+plot_window_length = 3000
 debug_plot_window_bounds = true
 
 [lsl]

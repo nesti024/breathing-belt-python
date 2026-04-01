@@ -30,7 +30,7 @@ class DisplayConfig:
     """Live plotting and terminal-debug settings."""
 
     enable_plot: bool = True
-    plot_window_length: int = 200
+    plot_window_length: int = 3000
     debug_plot_window_bounds: bool = True
 
 

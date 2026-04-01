@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from collections import deque
 from argparse import ArgumentParser
 from datetime import datetime
 from pathlib import Path
@@ -161,6 +162,7 @@ def run_acquisition(config: AppConfig) -> None:
     import keyboard
 
     BreathBelt = _import_breath_belt()
+    plot_window_samples = config.display.plot_window_length
     belt = None
     session_writer = None
     lsl_sender = None
@@ -169,14 +171,16 @@ def run_acquisition(config: AppConfig) -> None:
     normalized_ax = None
     normalized_line = None
     blit_manager = None
-    raw_sample_indices: list[int] = []
-    raw_signal: list[float] = []
-    normalized_sample_indices: list[int] = []
-    normalized_signal: list[float] = []
-    peak_sample_indices: list[int] = []
-    peak_raw_values: list[float] = []
-    trough_sample_indices: list[int] = []
-    trough_raw_values: list[float] = []
+    # Keep live plotting bounded to the configured window while session exports
+    # continue to capture the full run.
+    raw_sample_indices: deque[int] = deque(maxlen=plot_window_samples)
+    raw_signal: deque[float] = deque(maxlen=plot_window_samples)
+    normalized_sample_indices: deque[int] = deque(maxlen=plot_window_samples)
+    normalized_signal: deque[float] = deque(maxlen=plot_window_samples)
+    peak_sample_indices: deque[int] = deque(maxlen=plot_window_samples)
+    peak_raw_values: deque[float] = deque(maxlen=plot_window_samples)
+    trough_sample_indices: deque[int] = deque(maxlen=plot_window_samples)
+    trough_raw_values: deque[float] = deque(maxlen=plot_window_samples)
     acquisition_sample_index = 0
     lsl_reference_time: float | None = None
     selected_mode_number, processing_mode = prompt_processing_mode()
