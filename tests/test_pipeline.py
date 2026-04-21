@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import numpy as np
 
+from src.calibration import normalize_sample
 from src.pipeline import PipelineConfig, create_pipeline_state, process_device_row
 from src.quality import raw_qc_summary
 from src.settings import (
@@ -786,6 +787,52 @@ def test_pipeline_adaptive_mode_outputs_bounded_control_and_centered_movement() 
     assert np.all(normalized <= 1.0)
     assert float(np.min(movement)) < 0.0
     assert float(np.max(movement)) > 0.0
+
+
+def test_pipeline_adaptive_mode_exports_a_coherent_pre_update_snapshot() -> None:
+    cfg = _make_pipeline_config(
+        calibration_duration_s=5.0,
+        processing_mode="adaptive",
+        adaptation=AdaptationSettings(
+            center_enabled=True,
+            amplitude_enabled=True,
+            center_tau_s=8.0,
+            amplitude_tau_s=1.0,
+            startup_duration_s=0.5,
+            startup_center_tau_s=0.2,
+            startup_amplitude_tau_s=0.2,
+        ),
+    )
+    values = np.concatenate(
+        [
+            _make_breathing_values(cfg.calibration_target_samples, amplitude=20.0),
+            _make_breathing_values(500, amplitude=25.0),
+        ]
+    )
+
+    samples, _ = _replay(values, cfg)
+
+    runtime_samples = [sample for sample in samples if sample.stage == "runtime"]
+    assert runtime_samples
+
+    for sample in runtime_samples:
+        assert sample.normalized_value is not None
+        assert sample.movement_value is not None
+        assert sample.adaptive_center is not None
+        assert sample.adaptive_amplitude is not None
+        assert np.isclose(
+            float(sample.movement_value),
+            float(sample.cleaned_value - sample.adaptive_center),
+        )
+        assert np.isclose(
+            float(sample.normalized_value),
+            normalize_sample(
+                float(sample.cleaned_value),
+                float(sample.adaptive_center),
+                float(sample.adaptive_amplitude),
+                clamp=True,
+            ),
+        )
 
 
 def test_pipeline_adaptive_mode_updates_amplitude_for_changed_breathing_range() -> None:

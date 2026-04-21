@@ -355,6 +355,7 @@ def process_device_row(
         else:
             state.stage_sample_index += 1
     else:
+        sample_adaptive_state = state.adaptive_state
         if cfg.processing_mode == "movement":
             movement_value = _compute_runtime_movement_value(cleaned_value, state)
             extrema_event_code, extrema_event_label = _detect_runtime_extremum(
@@ -364,6 +365,7 @@ def process_device_row(
                 cfg,
             )
         elif cfg.processing_mode == "adaptive":
+            # Export one coherent pre-update adaptive snapshot with each sample.
             normalized_value, movement_value = _normalize_runtime_adaptive_sample(
                 cleaned_value,
                 is_artifact,
@@ -384,8 +386,18 @@ def process_device_row(
                 state,
                 cfg,
             )
-        adaptive_center = float(state.adaptive_state.center) if state.adaptive_state else None
-        adaptive_amplitude = float(state.adaptive_state.amplitude) if state.adaptive_state else None
+        if cfg.processing_mode == "adaptive":
+            adaptive_center = (
+                float(sample_adaptive_state.center) if sample_adaptive_state else None
+            )
+            adaptive_amplitude = (
+                float(sample_adaptive_state.amplitude) if sample_adaptive_state else None
+            )
+        else:
+            adaptive_center = float(state.adaptive_state.center) if state.adaptive_state else None
+            adaptive_amplitude = (
+                float(state.adaptive_state.amplitude) if state.adaptive_state else None
+            )
         state.runtime_processed_samples += 1
         state.stage_sample_index += 1
 
