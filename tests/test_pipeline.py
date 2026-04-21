@@ -171,6 +171,52 @@ def test_pipeline_uses_fixed_calibration_after_amplitude_change() -> None:
     assert np.isclose(state.adaptive_state.amplitude, amplitudes[0])
 
 
+def test_pipeline_calibration_result_tracks_raw_saturation_hits_even_with_raw_qc_disabled() -> None:
+    cfg = _make_pipeline_config(
+        raw_qc=RawQCConfig(
+            enabled=False,
+            raw_saturation_lo=1.0,
+            raw_saturation_hi=1022.0,
+        )
+    )
+    values = np.concatenate(
+        [
+            np.array([0.0, 1023.0, 1023.0, 0.0], dtype=float),
+            np.full(cfg.calibration_target_samples - 4, 512.0, dtype=float),
+        ]
+    )
+
+    _, state = _replay(values, cfg)
+
+    assert state.calibration_result is not None
+    assert state.calibration_result.saturated is True
+    assert state.calibration_result.saturated_count == 4
+
+
+def test_pipeline_movement_calibration_tracks_raw_saturation_hits_with_inverted_signal() -> None:
+    cfg = _make_pipeline_config(
+        processing_mode="movement",
+        invert_signal=True,
+        raw_qc=RawQCConfig(
+            enabled=False,
+            raw_saturation_lo=1.0,
+            raw_saturation_hi=1022.0,
+        ),
+    )
+    values = np.concatenate(
+        [
+            np.array([0.0, 1023.0, 0.0, 1023.0], dtype=float),
+            np.full(cfg.calibration_target_samples - 4, 512.0, dtype=float),
+        ]
+    )
+
+    _, state = _replay(values, cfg)
+
+    assert state.calibration_result is not None
+    assert state.calibration_result.saturated is True
+    assert state.calibration_result.saturated_count == 4
+
+
 def test_pipeline_hold_mode_freezes_output_level() -> None:
     cfg = _make_pipeline_config(
         calibration_duration_s=5.0,

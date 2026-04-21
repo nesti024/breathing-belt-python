@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from collections import deque
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 import math
 from typing import Literal
 
@@ -188,6 +188,7 @@ class PipelineState:
     emitted_normalized_value: float | None = None
     slowed_movement_value: float | None = None
     calibration_samples: list[float] = field(default_factory=list)
+    calibration_raw_saturated_count: int = 0
     calibration_result: CalibrationResult | None = None
     adaptive_state: AdaptiveRangeState | None = None
     runtime_processed_samples: int = 0
@@ -263,6 +264,8 @@ def process_device_row(
     extrema_event_label: str | None = None
 
     if stage == "calibration":
+        if _raw_sample_is_saturated(raw_sensor_value, cfg):
+            state.calibration_raw_saturated_count += 1
         state.calibration_samples.append(cleaned_value)
         collected = len(state.calibration_samples)
         clipped_collected = min(collected, cfg.calibration_target_samples)
@@ -305,6 +308,10 @@ def process_device_row(
                     state.calibration_result,
                     cfg.calibration.amplitude_floor,
                 )
+            state.calibration_result = _with_raw_calibration_saturation(
+                state.calibration_result,
+                state.calibration_raw_saturated_count,
+            )
             adaptive_center = float(state.adaptive_state.center)
             adaptive_amplitude = float(state.adaptive_state.amplitude)
             if cfg.processing_mode == "movement":
@@ -513,6 +520,24 @@ def _filter_sample(raw_sensor_value: float, state: PipelineState, cfg: PipelineC
             state.zi_lp,
         )
     return float(low_passed_value)
+
+
+def _raw_sample_is_saturated(raw_sensor_value: float, cfg: PipelineConfig) -> bool:
+    return (
+        float(raw_sensor_value) <= cfg.raw_qc.raw_saturation_lo
+        or float(raw_sensor_value) >= cfg.raw_qc.raw_saturation_hi
+    )
+
+
+def _with_raw_calibration_saturation(
+    calibration_result: CalibrationResult,
+    saturated_count: int,
+) -> CalibrationResult:
+    return replace(
+        calibration_result,
+        saturated=bool(saturated_count > 0),
+        saturated_count=int(saturated_count),
+    )
 
 
 def _suppress_reversal(
