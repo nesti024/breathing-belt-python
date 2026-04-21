@@ -9,12 +9,160 @@ bounded in-memory sample buffer for non-blocking access from the main loop.
 from __future__ import annotations
 
 from collections import deque
+from dataclasses import dataclass
 import threading
 import time
 from typing import Any
 
 import bitalino
 import numpy as np
+
+
+def lsl_local_clock() -> float:
+    """Return the current sender-side LSL clock time.
+
+    ``pylsl`` is imported lazily so acquisition tests can run without the
+    optional runtime dependency installed.
+    """
+
+    try:
+        from pylsl import local_clock
+    except ImportError:
+        return float(time.perf_counter())
+    return float(local_clock())
+
+
+@dataclass(frozen=True)
+class AcquiredRow:
+    """One acquired device row with sender-side timing provenance."""
+
+    device_row: np.ndarray
+    source_sample_index: int
+    capture_time_lsl_s: float
+
+    def copy(self) -> "AcquiredRow":
+        """Return a defensive copy suitable for external consumers."""
+
+        return AcquiredRow(
+            device_row=np.asarray(self.device_row).copy(),
+            source_sample_index=int(self.source_sample_index),
+            capture_time_lsl_s=float(self.capture_time_lsl_s),
+        )
+
+
+def _sequence_from_value(value: Any) -> int | None:
+    """Return a BITalino sequence value when the input looks valid."""
+
+    try:
+        numeric_value = float(value)
+    except (TypeError, ValueError):
+        return None
+
+    integer_value = int(round(numeric_value))
+    if abs(numeric_value - integer_value) > 1e-9:
+        return None
+    if not 0 <= integer_value <= 15:
+        return None
+    return integer_value
+
+
+def _extract_chunk_sequences(data_array: np.ndarray) -> list[int] | None:
+    """Return per-row sequence values when the first column is a valid BITalino counter."""
+
+    contiguous_rows = np.asarray(data_array)
+    if contiguous_rows.ndim != 2 or contiguous_rows.shape[1] == 0:
+        return None
+
+    sequences: list[int] = []
+    for row in contiguous_rows:
+        sequence = _sequence_from_value(row[0])
+        if sequence is None:
+            return None
+        sequences.append(sequence)
+    return sequences
+
+
+def _sequences_are_contiguous(
+    sequences: list[int],
+    *,
+    previous_sequence: int | None = None,
+) -> bool:
+    """Return whether sequence values form one contiguous BITalino span."""
+
+    if not sequences:
+        return False
+
+    expected_sequence = previous_sequence
+    for sequence in sequences:
+        if expected_sequence is None:
+            expected_sequence = sequence
+            continue
+        if sequence != ((expected_sequence + 1) % 16):
+            return False
+        expected_sequence = sequence
+    return True
+
+
+def timestamp_chunk_rows(
+    data_array: np.ndarray,
+    *,
+    starting_source_sample_index: int,
+    newest_capture_time_lsl_s: float,
+    sampling_rate_hz: int,
+) -> list[AcquiredRow]:
+    """Assign per-row host-estimated capture times to one returned device chunk."""
+
+    if sampling_rate_hz <= 0:
+        raise ValueError("sampling_rate_hz must be positive.")
+
+    contiguous_rows = np.asarray(data_array)
+    if contiguous_rows.ndim != 2:
+        raise ValueError("data_array must be two-dimensional.")
+
+    dt_s = 1.0 / float(sampling_rate_hz)
+    row_count = int(contiguous_rows.shape[0])
+    acquired_rows: list[AcquiredRow] = []
+    for offset, row in enumerate(contiguous_rows):
+        samples_from_newest = row_count - 1 - offset
+        acquired_rows.append(
+            AcquiredRow(
+                device_row=np.asarray(row).copy(),
+                source_sample_index=int(starting_source_sample_index + offset),
+                capture_time_lsl_s=float(
+                    newest_capture_time_lsl_s - (samples_from_newest * dt_s)
+                ),
+            )
+        )
+    return acquired_rows
+
+
+def timestamp_contiguous_rows(
+    data_array: np.ndarray,
+    *,
+    starting_source_sample_index: int,
+    first_capture_time_lsl_s: float,
+    sampling_rate_hz: int,
+) -> list[AcquiredRow]:
+    """Assign timestamps to a contiguous span from a known first-sample time."""
+
+    if sampling_rate_hz <= 0:
+        raise ValueError("sampling_rate_hz must be positive.")
+
+    contiguous_rows = np.asarray(data_array)
+    if contiguous_rows.ndim != 2:
+        raise ValueError("data_array must be two-dimensional.")
+
+    dt_s = 1.0 / float(sampling_rate_hz)
+    acquired_rows: list[AcquiredRow] = []
+    for offset, row in enumerate(contiguous_rows):
+        acquired_rows.append(
+            AcquiredRow(
+                device_row=np.asarray(row).copy(),
+                source_sample_index=int(starting_source_sample_index + offset),
+                capture_time_lsl_s=float(first_capture_time_lsl_s + (offset * dt_s)),
+            )
+        )
+    return acquired_rows
 
 
 def connect_device(
@@ -137,11 +285,23 @@ class BreathBelt:
         self._thread: threading.Thread | None = None
         self._stop_event = threading.Event()
         self._lock = threading.Lock()
-        self._queue: deque[np.ndarray] = deque(maxlen=self.queue_max_samples)
-        self._latest: np.ndarray | None = None
+        self._queue: deque[AcquiredRow] = deque(maxlen=self.queue_max_samples)
+        self._latest: AcquiredRow | None = None
         self._sample_width = 0
         self._last_error: Exception | None = None
         self._started = False
+        self._next_source_sample_index = 0
+        self._dropped_rows_total = 0
+        self._next_capture_time_lsl_s: float | None = None
+        self._last_device_sequence: int | None = None
+        self._segment_open = False
+
+    def _reset_timing_state(self) -> None:
+        """Reset reader-side timing provenance for a fresh acquisition segment."""
+
+        self._next_capture_time_lsl_s = None
+        self._last_device_sequence = None
+        self._segment_open = False
 
     def _reader_loop(self) -> None:
         """Continuously acquire chunks and append them to the bounded queue."""
@@ -160,12 +320,59 @@ class BreathBelt:
                 if data_array.ndim == 1:
                     data_array = data_array.reshape(1, -1)
 
+                dt_s = 1.0 / float(self.sampling_rate)
+                chunk_sequences = _extract_chunk_sequences(data_array)
+                sequence_continuity_known = chunk_sequences is not None and _sequences_are_contiguous(
+                    chunk_sequences
+                )
+                continue_existing_segment = (
+                    self._segment_open
+                    and self._next_capture_time_lsl_s is not None
+                    and (
+                        chunk_sequences is None
+                        or (
+                            sequence_continuity_known
+                            and self._last_device_sequence is not None
+                            and chunk_sequences[0] == ((self._last_device_sequence + 1) % 16)
+                        )
+                        or (
+                            sequence_continuity_known and self._last_device_sequence is None
+                        )
+                    )
+                )
+
+                if continue_existing_segment:
+                    acquired_rows = timestamp_contiguous_rows(
+                        data_array,
+                        starting_source_sample_index=self._next_source_sample_index,
+                        first_capture_time_lsl_s=self._next_capture_time_lsl_s,
+                        sampling_rate_hz=self.sampling_rate,
+                    )
+                else:
+                    acquired_rows = timestamp_chunk_rows(
+                        data_array,
+                        starting_source_sample_index=self._next_source_sample_index,
+                        newest_capture_time_lsl_s=lsl_local_clock(),
+                        sampling_rate_hz=self.sampling_rate,
+                    )
+
+                last_capture_time_lsl_s = acquired_rows[-1].capture_time_lsl_s
+
                 with self._lock:
                     self._sample_width = int(data_array.shape[1])
-                    for row in data_array:
-                        row_copy = np.asarray(row).copy()
-                        self._queue.append(row_copy)
-                        self._latest = row_copy
+                    self._next_source_sample_index += len(acquired_rows)
+                    self._next_capture_time_lsl_s = float(last_capture_time_lsl_s + dt_s)
+                    self._segment_open = True
+                    if sequence_continuity_known:
+                        self._last_device_sequence = chunk_sequences[-1]
+                    else:
+                        self._last_device_sequence = None
+                    for acquired_row in acquired_rows:
+                        if len(self._queue) >= self.queue_max_samples:
+                            self._queue.popleft()
+                            self._dropped_rows_total += 1
+                        self._queue.append(acquired_row)
+                        self._latest = acquired_row
             except Exception as error:
                 with self._lock:
                     self._last_error = error
@@ -186,6 +393,9 @@ class BreathBelt:
             self._latest = None
             self._sample_width = 0
             self._last_error = None
+            self._next_source_sample_index = 0
+            self._dropped_rows_total = 0
+            self._reset_timing_state()
 
         self._stop_event.clear()
         device = connect_device(
@@ -232,6 +442,9 @@ class BreathBelt:
         self._device = None
         self._started = False
 
+        with self._lock:
+            self._reset_timing_state()
+
         if device is None:
             return
 
@@ -246,27 +459,23 @@ class BreathBelt:
             with self._lock:
                 self._last_error = error
 
-    def get_latest(self) -> np.ndarray | None:
-        """Return the most recent sample or ``None`` if no data are available."""
+    def get_latest(self) -> AcquiredRow | None:
+        """Return the most recent acquired row or ``None`` if no data are available."""
 
         with self._lock:
             if self._latest is None:
                 return None
             return self._latest.copy()
 
-    def get_all(self) -> np.ndarray:
-        """Return and clear all currently buffered samples.
-
-        Returns an empty array when the queue is empty so callers can keep a
-        stable array-based interface.
-        """
+    def get_all(self) -> list[AcquiredRow]:
+        """Return and clear all currently buffered rows."""
 
         with self._lock:
             if len(self._queue) == 0:
-                return np.empty((0, self._sample_width), dtype=float)
-            rows = list(self._queue)
+                return []
+            rows = [row.copy() for row in self._queue]
             self._queue.clear()
-        return np.vstack(rows)
+        return rows
 
     @property
     def last_error(self) -> Exception | None:
@@ -281,3 +490,10 @@ class BreathBelt:
 
         thread = self._thread
         return bool(self._started and thread is not None and thread.is_alive())
+
+    @property
+    def dropped_rows_total(self) -> int:
+        """Total number of queue-overflow rows dropped since acquisition start."""
+
+        with self._lock:
+            return int(self._dropped_rows_total)

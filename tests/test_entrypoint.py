@@ -11,6 +11,7 @@ from types import SimpleNamespace
 import numpy as np
 
 import src.main as main_module
+from src.connect import AcquiredRow
 from src.main import prompt_processing_mode
 from src.pipeline import PipelineSample
 from src.settings import AppConfig, default_config
@@ -119,17 +120,22 @@ def test_run_acquisition_flushes_raw_export_once_per_chunk(monkeypatch) -> None:
         def start(self) -> None:
             return None
 
-        def get_all(self) -> np.ndarray:
+        def get_all(self) -> list[AcquiredRow]:
             self._reads += 1
             if self._reads == 1:
-                return np.array(
-                    [
-                        [0, 1, 2, 3, 4, 500, 0],
-                        [1, 1, 2, 3, 4, 501, 0],
-                    ],
-                    dtype=float,
-                )
-            return np.empty((0, 7), dtype=float)
+                return [
+                    AcquiredRow(
+                        device_row=np.array([0, 1, 2, 3, 4, 500, 0], dtype=float),
+                        source_sample_index=0,
+                        capture_time_lsl_s=10.0,
+                    ),
+                    AcquiredRow(
+                        device_row=np.array([1, 1, 2, 3, 4, 501, 0], dtype=float),
+                        source_sample_index=1,
+                        capture_time_lsl_s=10.01,
+                    ),
+                ]
+            return []
 
         def stop(self) -> None:
             return None
@@ -148,8 +154,8 @@ def test_run_acquisition_flushes_raw_export_once_per_chunk(monkeypatch) -> None:
             self.app_config = app_config
             self.device_sample_width = device_sample_width
             self.flush_calls = 0
-            self.device_rows: list[tuple[str, int, float, np.ndarray]] = []
-            self.signal_samples: list[PipelineSample] = []
+            self.device_rows: list[tuple[str, int, float, np.ndarray, int, float, float]] = []
+            self.signal_samples: list[tuple[PipelineSample, int, float, float, float | None]] = []
             self.qc_events: list[object] = []
             self.resolved_config_path = Path("resolved_config.toml")
             writer_instances.append(self)
@@ -160,11 +166,41 @@ def test_run_acquisition_flushes_raw_export_once_per_chunk(monkeypatch) -> None:
             sample_index: int,
             relative_time_s: float,
             device_row: np.ndarray,
+            *,
+            source_sample_index: int,
+            capture_time_lsl_s: float,
+            lsl_timestamp_s: float,
         ) -> None:
-            self.device_rows.append((stage, sample_index, relative_time_s, device_row.copy()))
+            self.device_rows.append(
+                (
+                    stage,
+                    sample_index,
+                    relative_time_s,
+                    device_row.copy(),
+                    source_sample_index,
+                    capture_time_lsl_s,
+                    lsl_timestamp_s,
+                )
+            )
 
-        def write_signal_sample(self, sample: PipelineSample) -> None:
-            self.signal_samples.append(sample)
+        def write_signal_sample(
+            self,
+            sample: PipelineSample,
+            *,
+            source_sample_index: int,
+            capture_time_lsl_s: float,
+            lsl_timestamp_s: float,
+            event_timestamp_lsl_s: float | None = None,
+        ) -> None:
+            self.signal_samples.append(
+                (
+                    sample,
+                    source_sample_index,
+                    capture_time_lsl_s,
+                    lsl_timestamp_s,
+                    event_timestamp_lsl_s,
+                )
+            )
 
         def write_qc_event(self, event: object) -> None:
             self.qc_events.append(event)
@@ -254,14 +290,23 @@ def test_run_acquisition_limits_live_plot_history_to_configured_window(monkeypat
         def start(self) -> None:
             return None
 
-        def get_all(self) -> np.ndarray:
+        def get_all(self) -> list[AcquiredRow]:
             self._reads += 1
             if self._reads == 1:
-                rows = []
+                rows: list[AcquiredRow] = []
                 for sample_index in range(8):
-                    rows.append([sample_index, 1, 2, 3, 4, 500 + sample_index, 0])
-                return np.asarray(rows, dtype=float)
-            return np.empty((0, 7), dtype=float)
+                    rows.append(
+                        AcquiredRow(
+                            device_row=np.asarray(
+                                [sample_index, 1, 2, 3, 4, 500 + sample_index, 0],
+                                dtype=float,
+                            ),
+                            source_sample_index=sample_index,
+                            capture_time_lsl_s=10.0 + (sample_index / 100.0),
+                        )
+                    )
+                return rows
+            return []
 
         def stop(self) -> None:
             return None
@@ -285,11 +330,31 @@ def test_run_acquisition_limits_live_plot_history_to_configured_window(monkeypat
             sample_index: int,
             relative_time_s: float,
             device_row: np.ndarray,
+            *,
+            source_sample_index: int,
+            capture_time_lsl_s: float,
+            lsl_timestamp_s: float,
         ) -> None:
-            del stage, sample_index, relative_time_s, device_row
+            del (
+                stage,
+                sample_index,
+                relative_time_s,
+                device_row,
+                source_sample_index,
+                capture_time_lsl_s,
+                lsl_timestamp_s,
+            )
 
-        def write_signal_sample(self, sample: PipelineSample) -> None:
-            del sample
+        def write_signal_sample(
+            self,
+            sample: PipelineSample,
+            *,
+            source_sample_index: int,
+            capture_time_lsl_s: float,
+            lsl_timestamp_s: float,
+            event_timestamp_lsl_s: float | None = None,
+        ) -> None:
+            del sample, source_sample_index, capture_time_lsl_s, lsl_timestamp_s, event_timestamp_lsl_s
 
         def write_qc_event(self, event: object) -> None:
             del event

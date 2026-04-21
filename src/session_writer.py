@@ -42,7 +42,15 @@ class SessionWriter:
         )
         self._device_writer = DictWriter(
             self._device_file,
-            fieldnames=["stage", "sample_index", "relative_time_s", *device_columns],
+            fieldnames=[
+                "stage",
+                "sample_index",
+                "relative_time_s",
+                "source_sample_index",
+                "capture_time_lsl_s",
+                "lsl_timestamp_s",
+                *device_columns,
+            ],
         )
         self._device_writer.writeheader()
         self._signal_file = (self.session_dir / "signal_trace.csv").open("w", newline="", encoding="utf-8")
@@ -52,6 +60,10 @@ class SessionWriter:
                 "stage",
                 "sample_index",
                 "relative_time_s",
+                "source_sample_index",
+                "capture_time_lsl_s",
+                "lsl_timestamp_s",
+                "event_timestamp_lsl_s",
                 "processing_mode",
                 "selected_sensor_raw",
                 "filtered_value",
@@ -91,6 +103,10 @@ class SessionWriter:
         sample_index: int,
         relative_time_s: float,
         device_row: np.ndarray,
+        *,
+        source_sample_index: int,
+        capture_time_lsl_s: float,
+        lsl_timestamp_s: float,
     ) -> None:
         """Append one raw device row to the session export."""
 
@@ -105,6 +121,9 @@ class SessionWriter:
             "stage": stage,
             "sample_index": sample_index,
             "relative_time_s": f"{relative_time_s:.6f}",
+            "source_sample_index": source_sample_index,
+            "capture_time_lsl_s": f"{capture_time_lsl_s:.6f}",
+            "lsl_timestamp_s": f"{lsl_timestamp_s:.6f}",
         }
         row_payload.update({f"device_col_{idx}": value for idx, value in enumerate(row_array)})
         self._device_writer.writerow(row_payload)
@@ -117,7 +136,15 @@ class SessionWriter:
         self._device_file.flush()
         os.fsync(self._device_file.fileno())
 
-    def write_signal_sample(self, sample: PipelineSample) -> None:
+    def write_signal_sample(
+        self,
+        sample: PipelineSample,
+        *,
+        source_sample_index: int,
+        capture_time_lsl_s: float,
+        lsl_timestamp_s: float,
+        event_timestamp_lsl_s: float | None = None,
+    ) -> None:
         """Append one processed pipeline sample to the signal trace export."""
 
         self._signal_writer.writerow(
@@ -125,6 +152,14 @@ class SessionWriter:
                 "stage": sample.stage,
                 "sample_index": sample.sample_index,
                 "relative_time_s": f"{sample.relative_time_s:.6f}",
+                "source_sample_index": source_sample_index,
+                "capture_time_lsl_s": f"{capture_time_lsl_s:.6f}",
+                "lsl_timestamp_s": f"{lsl_timestamp_s:.6f}",
+                "event_timestamp_lsl_s": (
+                    ""
+                    if event_timestamp_lsl_s is None
+                    else f"{event_timestamp_lsl_s:.6f}"
+                ),
                 "processing_mode": sample.processing_mode,
                 "selected_sensor_raw": f"{sample.selected_sensor_raw:.6f}",
                 "filtered_value": f"{sample.filtered_value:.6f}",
@@ -192,6 +227,7 @@ def build_session_metadata(
     qc_summary: dict[str, Any],
     processing_mode: str = "control",
     selected_mode_number: int = 1,
+    lsl_run_stats: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     """Build a JSON-serializable metadata object for one session."""
 
@@ -206,6 +242,31 @@ def build_session_metadata(
     control_max = (
         None if calibration_result is None or not control_active else float(calibration_result.y_max)
     )
+    lsl_control_stream = _build_control_lsl_metadata(config, processing_mode)
+    lsl_event_stream = _build_event_lsl_metadata(config, processing_mode)
+    lsl_timing = {
+        "timestamp_domain": "local_clock",
+        "timestamp_origin": "host_estimated_segment_anchor",
+        "chunk_backfill_policy": "nominal_fs_continuation_across_contiguous_reads",
+        "constant_delay_s": config.lsl.constant_delay_s,
+        "discontinuity_policy": "preserve_timestamp_gaps_after_loss",
+        "authoritative_export_timestamp_field": "lsl_timestamp_s",
+        "raw_capture_timestamp_field": "capture_time_lsl_s",
+    }
+    default_lsl_run_stats = {
+        "control_send_strategy": "hybrid_explicit_timestamps",
+        "control_samples_sent": 0,
+        "control_samples_sent_individually": 0,
+        "control_samples_sent_via_chunks": 0,
+        "control_chunks_sent": 0,
+        "event_samples_sent": 0,
+        "queue_dropped_rows_total": 0,
+        "observed_gap_count": 0,
+    }
+    merged_lsl_run_stats = {
+        **default_lsl_run_stats,
+        **({} if lsl_run_stats is None else lsl_run_stats),
+    }
     metadata = {
         "started_at": started_at,
         "ended_at": ended_at,
@@ -309,43 +370,86 @@ def build_session_metadata(
             "extrema_min_interval_ms": config.extrema.min_interval_ms,
             "extrema_prominence_ratio": config.extrema.prominence_ratio,
         },
-        "lsl_stream": {
+        "lsl": {
             "enabled": config.lsl.enable,
-            "channel_count": 2 if config.lsl.enable else 0,
-            "stream_name": (
-                config.lsl.stream_name
-                if processing_mode == "control"
-                else (
-                    f"{config.lsl.stream_name}Movement"
-                    if processing_mode == "movement"
-                    else f"{config.lsl.stream_name}Adaptive"
-                )
-            ) if config.lsl.enable else None,
-            "stream_type": (
-                config.lsl.stream_type
-                if processing_mode == "control"
-                else (
-                    "BreathingMovement"
-                    if processing_mode == "movement"
-                    else "BreathingAdaptive"
-                )
-            ) if config.lsl.enable else None,
-            "source_id": (
-                config.lsl.source_id
-                if processing_mode == "control"
-                else (
-                    f"{config.lsl.source_id}_movement"
-                    if processing_mode == "movement"
-                    else f"{config.lsl.source_id}_adaptive"
-                )
-            ) if config.lsl.enable else None,
-            "channel_names": (
-                ["breath_level", "event_code"]
-                if processing_mode != "movement"
-                else ["movement_value", "event_code"]
-            ) if config.lsl.enable else [],
+            "control_stream": lsl_control_stream,
+            "event_stream": lsl_event_stream,
+            "timing": lsl_timing,
+            "run_stats": merged_lsl_run_stats,
         },
         "final_adaptive_state": adaptive_payload,
         "raw_qc_summary": qc_summary,
     }
     return metadata
+
+
+def _build_control_lsl_metadata(config: AppConfig, processing_mode: str) -> dict[str, Any]:
+    if not config.lsl.enable:
+        return {
+            "enabled": False,
+            "channel_count": 0,
+            "stream_name": None,
+            "stream_type": None,
+            "source_id": None,
+            "channel_names": [],
+            "nominal_srate_hz": None,
+        }
+
+    if processing_mode == "movement":
+        return {
+            "enabled": True,
+            "channel_count": 1,
+            "stream_name": f"{config.lsl.stream_name}Movement",
+            "stream_type": "BreathingMovement",
+            "source_id": f"{config.lsl.source_id}_movement",
+            "channel_names": ["movement_value"],
+            "nominal_srate_hz": config.device.sampling_rate_hz,
+        }
+    if processing_mode == "adaptive":
+        return {
+            "enabled": True,
+            "channel_count": 1,
+            "stream_name": f"{config.lsl.stream_name}Adaptive",
+            "stream_type": "BreathingAdaptive",
+            "source_id": f"{config.lsl.source_id}_adaptive",
+            "channel_names": ["breath_level"],
+            "nominal_srate_hz": config.device.sampling_rate_hz,
+        }
+    return {
+        "enabled": True,
+        "channel_count": 1,
+        "stream_name": config.lsl.stream_name,
+        "stream_type": config.lsl.stream_type,
+        "source_id": config.lsl.source_id,
+        "channel_names": ["breath_level"],
+        "nominal_srate_hz": config.device.sampling_rate_hz,
+    }
+
+
+def _build_event_lsl_metadata(config: AppConfig, processing_mode: str) -> dict[str, Any]:
+    if not config.lsl.enable:
+        return {
+            "enabled": False,
+            "channel_count": 0,
+            "stream_name": None,
+            "stream_type": None,
+            "source_id": None,
+            "channel_names": [],
+            "nominal_srate_hz": None,
+            "event_code_map": {},
+        }
+
+    control_metadata = _build_control_lsl_metadata(config, processing_mode)
+    return {
+        "enabled": True,
+        "channel_count": 1,
+        "stream_name": f"{control_metadata['stream_name']}Events",
+        "stream_type": "BreathingEvents",
+        "source_id": f"{control_metadata['source_id']}_events",
+        "channel_names": ["event_code"],
+        "nominal_srate_hz": 0.0,
+        "event_code_map": {
+            "1.0": "inhale_peak",
+            "-1.0": "exhale_trough",
+        },
+    }

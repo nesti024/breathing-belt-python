@@ -21,6 +21,7 @@ enable = true
 stream_name = "BreathingBelt"
 stream_type = "Breathing"
 source_id = "breathingbelt001"
+constant_delay_s = 0.0
 
 [filter]
 # High-pass parameters are retained for backward compatibility and are ignored

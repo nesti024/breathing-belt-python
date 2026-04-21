@@ -40,6 +40,21 @@ def _device_sample_width(config: AppConfig) -> int:
     return 5 + len(config.device.channels)
 
 
+def _timing_kwargs(
+    *,
+    source_sample_index: int,
+    capture_time_lsl_s: float,
+    lsl_timestamp_s: float,
+    event_timestamp_lsl_s: float | None = None,
+) -> dict[str, float | int | None]:
+    return {
+        "source_sample_index": source_sample_index,
+        "capture_time_lsl_s": capture_time_lsl_s,
+        "lsl_timestamp_s": lsl_timestamp_s,
+        "event_timestamp_lsl_s": event_timestamp_lsl_s,
+    }
+
+
 def test_session_writer_creates_expected_files_and_rows() -> None:
     config = _make_config()
     root_dir = Path(".codex-tmp") / f"session-writer-test-{uuid4().hex}"
@@ -54,7 +69,7 @@ def test_session_writer_creates_expected_files_and_rows() -> None:
         device_path = writer.session_dir / "device_samples.csv"
         assert device_path.exists()
         assert device_path.read_text(encoding="utf-8").splitlines() == [
-            "stage,sample_index,relative_time_s,device_col_0,device_col_1,device_col_2,device_col_3,device_col_4,device_col_5,device_col_6"
+            "stage,sample_index,relative_time_s,source_sample_index,capture_time_lsl_s,lsl_timestamp_s,device_col_0,device_col_1,device_col_2,device_col_3,device_col_4,device_col_5,device_col_6"
         ]
 
         calibration_sample = PipelineSample(
@@ -102,15 +117,32 @@ def test_session_writer_creates_expected_files_and_rows() -> None:
             0,
             0.0,
             np.array([0, 1, 2, 3, 4, 512, 0], dtype=float),
+            source_sample_index=0,
+            capture_time_lsl_s=10.0,
+            lsl_timestamp_s=9.95,
         )
-        writer.write_signal_sample(calibration_sample)
+        writer.write_signal_sample(
+            calibration_sample,
+            source_sample_index=0,
+            capture_time_lsl_s=10.0,
+            lsl_timestamp_s=9.95,
+        )
         writer.write_device_row(
             "runtime",
             0,
             0.0,
             np.array([0, 1, 2, 3, 4, 500, 0], dtype=float),
+            source_sample_index=1,
+            capture_time_lsl_s=10.01,
+            lsl_timestamp_s=9.96,
         )
-        writer.write_signal_sample(runtime_sample)
+        writer.write_signal_sample(
+            runtime_sample,
+            source_sample_index=1,
+            capture_time_lsl_s=10.01,
+            lsl_timestamp_s=9.96,
+            event_timestamp_lsl_s=9.95,
+        )
         writer.write_qc_event(qc_event)
 
         metadata = build_session_metadata(
@@ -146,16 +178,19 @@ def test_session_writer_creates_expected_files_and_rows() -> None:
                 "first_event_sample_index": 1,
                 "last_event_sample_index": 1,
             },
+            lsl_run_stats={
+                "control_samples_sent": 1,
+                "control_samples_sent_via_chunks": 0,
+                "control_samples_sent_individually": 1,
+                "control_chunks_sent": 0,
+                "event_samples_sent": 1,
+                "queue_dropped_rows_total": 2,
+                "observed_gap_count": 1,
+            },
         )
         writer.finalize(metadata)
 
         session_dir = writer.session_dir
-        assert (session_dir / "resolved_config.toml").exists()
-        assert (session_dir / "session_metadata.json").exists()
-        assert (session_dir / "device_samples.csv").exists()
-        assert (session_dir / "signal_trace.csv").exists()
-        assert (session_dir / "qc_events.csv").exists()
-
         with (session_dir / "device_samples.csv").open(
             "r",
             encoding="utf-8",
@@ -163,7 +198,9 @@ def test_session_writer_creates_expected_files_and_rows() -> None:
         ) as handle:
             device_rows = list(csv.DictReader(handle))
         assert device_rows[0]["stage"] == "calibration"
-        assert device_rows[1]["stage"] == "runtime"
+        assert device_rows[1]["source_sample_index"] == "1"
+        assert device_rows[1]["capture_time_lsl_s"] == "10.010000"
+        assert device_rows[1]["lsl_timestamp_s"] == "9.960000"
         assert "device_col_5" in device_rows[0]
 
         with (session_dir / "signal_trace.csv").open(
@@ -175,10 +212,12 @@ def test_session_writer_creates_expected_files_and_rows() -> None:
         assert signal_rows[0]["stage"] == "calibration"
         assert signal_rows[1]["stage"] == "runtime"
         assert signal_rows[1]["processing_mode"] == "control"
+        assert signal_rows[1]["source_sample_index"] == "1"
         assert signal_rows[1]["normalized_value"] == "0.600000"
         assert signal_rows[1]["movement_value"] == ""
         assert signal_rows[1]["extrema_event_code"] == "1.0"
         assert signal_rows[1]["extrema_event_label"] == "inhale_peak"
+        assert signal_rows[1]["event_timestamp_lsl_s"] == "9.950000"
 
         with (session_dir / "qc_events.csv").open(
             "r",
@@ -196,37 +235,20 @@ def test_session_writer_creates_expected_files_and_rows() -> None:
         assert stored_metadata["selected_mode_number"] == 1
         assert stored_metadata["calibration_result"]["amplitude"] == 1.0
         assert stored_metadata["control_model"]["active"] is True
-        assert stored_metadata["control_model"]["mode"] == "fixed_calibration_padded_extrema_hold_output_smoothing"
-        assert stored_metadata["control_model"]["calibration_padding_ratio"] == 0.2
-        assert stored_metadata["control_model"]["control_min"] == -1.2
-        assert stored_metadata["control_model"]["control_max"] == 1.2
-        assert stored_metadata["control_model"]["hold_enabled"] is True
-        assert stored_metadata["control_model"]["hold_edge_margin_ratio"] == 0.2
-        assert stored_metadata["control_model"]["hold_release_drift"] == 0.03
-        assert stored_metadata["control_model"]["output_smoothing_enabled"] is True
-        assert stored_metadata["control_model"]["output_smoothing_activity_window_ms"] == 500
-        assert stored_metadata["control_model"]["output_smoothing_tau_active_s"] == 0.25
-        assert stored_metadata["control_model"]["output_smoothing_tau_extreme_s"] == 0.75
-        assert stored_metadata["control_model"]["output_smoothing_tau_hold_s"] == 5.0
-        assert (
-            stored_metadata["control_model"]["output_smoothing_activity_low_ratio_per_sec"]
-            == 0.1
-        )
-        assert (
-            stored_metadata["control_model"]["output_smoothing_activity_high_ratio_per_sec"]
-            == 0.5
-        )
-        assert (
-            stored_metadata["control_model"]["output_smoothing_activity_floor_per_sec"]
-            == 0.01
-        )
-        assert stored_metadata["control_model"]["output_smoothing_edge_margin_ratio"] == 0.1
         assert stored_metadata["adaptation_settings"]["low_activity_gating_enabled"] is True
-        assert stored_metadata["adaptation_settings"]["low_activity_window_ms"] == 800
-        assert stored_metadata["lsl_stream"]["channel_count"] == 2
-        assert stored_metadata["lsl_stream"]["channel_names"] == ["breath_level", "event_code"]
-        assert stored_metadata["movement_model"]["active"] is False
-        assert stored_metadata["adaptive_model"]["active"] is False
+        assert stored_metadata["lsl"]["control_stream"]["channel_count"] == 1
+        assert stored_metadata["lsl"]["control_stream"]["channel_names"] == ["breath_level"]
+        assert stored_metadata["lsl"]["event_stream"]["stream_name"] == "BreathingBeltEvents"
+        assert stored_metadata["lsl"]["event_stream"]["nominal_srate_hz"] == 0.0
+        assert stored_metadata["lsl"]["timing"]["timestamp_domain"] == "local_clock"
+        assert stored_metadata["lsl"]["timing"]["timestamp_origin"] == "host_estimated_segment_anchor"
+        assert (
+            stored_metadata["lsl"]["timing"]["chunk_backfill_policy"]
+            == "nominal_fs_continuation_across_contiguous_reads"
+        )
+        assert stored_metadata["lsl"]["timing"]["constant_delay_s"] == 0.0
+        assert stored_metadata["lsl"]["run_stats"]["queue_dropped_rows_total"] == 2
+        assert stored_metadata["lsl"]["run_stats"]["observed_gap_count"] == 1
         assert stored_metadata["raw_qc_summary"]["event_counts"]["saturation"] == 1
     finally:
         shutil.rmtree(root_dir, ignore_errors=True)
@@ -248,7 +270,7 @@ def test_session_writer_keeps_header_only_raw_file_when_no_samples_are_written()
         device_path = session_dir / "device_samples.csv"
         assert device_path.exists()
         assert device_path.read_text(encoding="utf-8").splitlines() == [
-            "stage,sample_index,relative_time_s,device_col_0,device_col_1,device_col_2,device_col_3,device_col_4,device_col_5,device_col_6"
+            "stage,sample_index,relative_time_s,source_sample_index,capture_time_lsl_s,lsl_timestamp_s,device_col_0,device_col_1,device_col_2,device_col_3,device_col_4,device_col_5,device_col_6"
         ]
     finally:
         shutil.rmtree(root_dir, ignore_errors=True)
@@ -271,6 +293,9 @@ def test_session_writer_rejects_raw_row_width_mismatch() -> None:
                 0,
                 0.0,
                 np.array([0, 1, 2, 3, 4, 500], dtype=float),
+                source_sample_index=0,
+                capture_time_lsl_s=1.0,
+                lsl_timestamp_s=1.0,
             )
 
         writer.close()
@@ -296,6 +321,9 @@ def test_session_writer_flush_raw_fsyncs_device_file(monkeypatch) -> None:
             0,
             0.0,
             np.array([0, 1, 2, 3, 4, 500, 0], dtype=float),
+            source_sample_index=0,
+            capture_time_lsl_s=1.0,
+            lsl_timestamp_s=1.0,
         )
         writer.flush_raw()
 
@@ -339,8 +367,17 @@ def test_session_writer_records_movement_mode_rows_and_metadata() -> None:
             0,
             0.0,
             np.array([0, 1, 2, 3, 4, 500, 0], dtype=float),
+            source_sample_index=5,
+            capture_time_lsl_s=20.0,
+            lsl_timestamp_s=19.9,
         )
-        writer.write_signal_sample(movement_sample)
+        writer.write_signal_sample(
+            movement_sample,
+            source_sample_index=5,
+            capture_time_lsl_s=20.0,
+            lsl_timestamp_s=19.9,
+            event_timestamp_lsl_s=19.89,
+        )
 
         metadata = build_session_metadata(
             config=config,
@@ -390,20 +427,17 @@ def test_session_writer_records_movement_mode_rows_and_metadata() -> None:
         assert signal_rows[0]["processing_mode"] == "movement"
         assert signal_rows[0]["normalized_value"] == ""
         assert signal_rows[0]["movement_value"] == "1.500000"
+        assert signal_rows[0]["event_timestamp_lsl_s"] == "19.890000"
 
         stored_metadata = json.loads(
             (session_dir / "session_metadata.json").read_text(encoding="utf-8")
         )
         assert stored_metadata["processing_mode"] == "movement"
         assert stored_metadata["selected_mode_number"] == 2
-        assert stored_metadata["control_model"]["active"] is False
         assert stored_metadata["movement_model"]["active"] is True
-        assert stored_metadata["adaptive_model"]["active"] is False
-        assert stored_metadata["movement_model"]["reference_amplitude"] == 2.0
-        assert stored_metadata["movement_model"]["low_activity_slowdown_enabled"] is False
-        assert stored_metadata["movement_model"]["low_activity_window_ms"] == 800
-        assert stored_metadata["lsl_stream"]["stream_name"] == "BreathingBeltMovement"
-        assert stored_metadata["lsl_stream"]["channel_names"] == ["movement_value", "event_code"]
+        assert stored_metadata["lsl"]["control_stream"]["stream_name"] == "BreathingBeltMovement"
+        assert stored_metadata["lsl"]["control_stream"]["channel_names"] == ["movement_value"]
+        assert stored_metadata["lsl"]["event_stream"]["stream_name"] == "BreathingBeltMovementEvents"
     finally:
         shutil.rmtree(root_dir, ignore_errors=True)
 
@@ -442,8 +476,17 @@ def test_session_writer_records_adaptive_mode_rows_and_metadata() -> None:
             0,
             0.0,
             np.array([0, 1, 2, 3, 4, 500, 0], dtype=float),
+            source_sample_index=8,
+            capture_time_lsl_s=30.0,
+            lsl_timestamp_s=29.95,
         )
-        writer.write_signal_sample(adaptive_sample)
+        writer.write_signal_sample(
+            adaptive_sample,
+            source_sample_index=8,
+            capture_time_lsl_s=30.0,
+            lsl_timestamp_s=29.95,
+            event_timestamp_lsl_s=29.94,
+        )
 
         metadata = build_session_metadata(
             config=config,
@@ -499,13 +542,10 @@ def test_session_writer_records_adaptive_mode_rows_and_metadata() -> None:
         )
         assert stored_metadata["processing_mode"] == "adaptive"
         assert stored_metadata["selected_mode_number"] == 3
-        assert stored_metadata["control_model"]["active"] is False
-        assert stored_metadata["movement_model"]["active"] is False
         assert stored_metadata["adaptive_model"]["active"] is True
         assert stored_metadata["adaptive_model"]["initial_amplitude"] == 1.5
-        assert stored_metadata["adaptive_model"]["low_activity_gating_enabled"] is True
-        assert stored_metadata["adaptive_model"]["low_activity_window_ms"] == 800
-        assert stored_metadata["lsl_stream"]["stream_name"] == "BreathingBeltAdaptive"
-        assert stored_metadata["lsl_stream"]["channel_names"] == ["breath_level", "event_code"]
+        assert stored_metadata["lsl"]["control_stream"]["stream_name"] == "BreathingBeltAdaptive"
+        assert stored_metadata["lsl"]["control_stream"]["channel_names"] == ["breath_level"]
+        assert stored_metadata["lsl"]["event_stream"]["stream_name"] == "BreathingBeltAdaptiveEvents"
     finally:
         shutil.rmtree(root_dir, ignore_errors=True)

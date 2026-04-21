@@ -42,6 +42,7 @@ class LSLConfig:
     stream_name: str = "BreathingBelt"
     stream_type: str = "Breathing"
     source_id: str = "breathingbelt001"
+    constant_delay_s: float = 0.0
 
 
 @dataclass(frozen=True)
@@ -332,6 +333,9 @@ def _load_lsl_config(section: dict[str, Any]) -> LSLConfig:
         stream_name=str(section.get("stream_name", defaults.stream_name)),
         stream_type=str(section.get("stream_type", defaults.stream_type)),
         source_id=str(section.get("source_id", defaults.source_id)),
+        constant_delay_s=float(
+            section.get("constant_delay_s", defaults.constant_delay_s)
+        ),
     )
 
 
@@ -559,6 +563,8 @@ def _validate_config(config: AppConfig) -> None:
         raise ValueError("device.channels must contain at least one channel.")
     if config.display.plot_window_length <= 0:
         raise ValueError("display.plot_window_length must be positive.")
+    if config.lsl.constant_delay_s < 0.0:
+        raise ValueError("lsl.constant_delay_s must be non-negative.")
     _validate_filter_section(
         config.device.sampling_rate_hz,
         config.filter.hp_cutoff_hz,

@@ -133,27 +133,82 @@ def _plot_panel_config(processing_mode: ProcessingMode) -> tuple[str, str]:
     return "Breath Level (0-1)", "Breath Level"
 
 
-def _lsl_config_for_mode(config: AppConfig, processing_mode: ProcessingMode) -> tuple[str, str, str, tuple[str, str]]:
+def _lsl_config_for_mode(
+    config: AppConfig,
+    processing_mode: ProcessingMode,
+) -> tuple[str, str, str, tuple[str, ...]]:
     if processing_mode == "movement":
         return (
             f"{config.lsl.stream_name}Movement",
             "BreathingMovement",
             f"{config.lsl.source_id}_movement",
-            ("movement_value", "event_code"),
+            ("movement_value",),
         )
     if processing_mode == "adaptive":
         return (
             f"{config.lsl.stream_name}Adaptive",
             "BreathingAdaptive",
             f"{config.lsl.source_id}_adaptive",
-            ("breath_level", "event_code"),
+            ("breath_level",),
         )
     return (
         config.lsl.stream_name,
         config.lsl.stream_type,
         config.lsl.source_id,
-        ("breath_level", "event_code"),
+        ("breath_level",),
     )
+
+
+def _lsl_event_config_for_mode(
+    config: AppConfig,
+    processing_mode: ProcessingMode,
+) -> tuple[str, str, str, tuple[str]]:
+    stream_name, _, source_id, _ = _lsl_config_for_mode(config, processing_mode)
+    return (
+        f"{stream_name}Events",
+        "BreathingEvents",
+        f"{source_id}_events",
+        ("event_code",),
+    )
+
+
+def _lsl_timing_metadata(config: AppConfig) -> dict[str, str | float]:
+    return {
+        "timestamp_domain": "local_clock",
+        "timestamp_origin": "host_estimated_segment_anchor",
+        "chunk_backfill_policy": "nominal_fs_continuation_across_contiguous_reads",
+        "constant_delay_s": config.lsl.constant_delay_s,
+        "discontinuity_policy": "preserve_timestamp_gaps_after_loss",
+    }
+
+
+def _effective_lsl_timestamp(capture_time_lsl_s: float, constant_delay_s: float) -> float:
+    return float(capture_time_lsl_s - constant_delay_s)
+
+
+def _flush_control_span(
+    sender,
+    *,
+    samples: list[float],
+    timestamps: list[float],
+    lsl_run_stats: dict[str, int | str],
+) -> None:
+    if sender is None or not samples:
+        samples.clear()
+        timestamps.clear()
+        return
+
+    if len(samples) == 1:
+        sender.send(samples[0], timestamp=timestamps[0])
+        lsl_run_stats["control_samples_sent"] += 1
+        lsl_run_stats["control_samples_sent_individually"] += 1
+    else:
+        sender.send_chunk(samples, timestamps=timestamps)
+        lsl_run_stats["control_samples_sent"] += len(samples)
+        lsl_run_stats["control_samples_sent_via_chunks"] += len(samples)
+        lsl_run_stats["control_chunks_sent"] += 1
+    samples.clear()
+    timestamps.clear()
 
 
 def run_acquisition(config: AppConfig) -> None:
@@ -165,14 +220,13 @@ def run_acquisition(config: AppConfig) -> None:
     plot_window_samples = config.display.plot_window_length
     belt = None
     session_writer = None
-    lsl_sender = None
+    lsl_control_sender = None
+    lsl_event_sender = None
     raw_ax = None
     raw_line = None
     normalized_ax = None
     normalized_line = None
     blit_manager = None
-    # Keep live plotting bounded to the configured window while session exports
-    # continue to capture the full run.
     raw_sample_indices: deque[int] = deque(maxlen=plot_window_samples)
     raw_signal: deque[float] = deque(maxlen=plot_window_samples)
     normalized_sample_indices: deque[int] = deque(maxlen=plot_window_samples)
@@ -181,8 +235,19 @@ def run_acquisition(config: AppConfig) -> None:
     peak_raw_values: deque[float] = deque(maxlen=plot_window_samples)
     trough_sample_indices: deque[int] = deque(maxlen=plot_window_samples)
     trough_raw_values: deque[float] = deque(maxlen=plot_window_samples)
-    acquisition_sample_index = 0
-    lsl_reference_time: float | None = None
+    previous_source_sample_index: int | None = None
+    previous_runtime_lsl_timestamp: float | None = None
+    reported_dropped_rows_total = 0
+    lsl_run_stats: dict[str, int | str] = {
+        "control_send_strategy": "hybrid_explicit_timestamps",
+        "control_samples_sent": 0,
+        "control_samples_sent_individually": 0,
+        "control_samples_sent_via_chunks": 0,
+        "control_chunks_sent": 0,
+        "event_samples_sent": 0,
+        "queue_dropped_rows_total": 0,
+        "observed_gap_count": 0,
+    }
     selected_mode_number, processing_mode = prompt_processing_mode()
     print(
         "Selected mode "
@@ -246,13 +311,30 @@ def run_acquisition(config: AppConfig) -> None:
                 config,
                 processing_mode,
             )
-            lsl_sender = LSLBreathingSender(
+            lsl_control_sender = LSLBreathingSender(
                 name=stream_name,
                 type=stream_type,
-                channel_count=2,
+                channel_count=1,
                 nominal_srate=config.device.sampling_rate_hz,
                 source_id=source_id,
                 channel_labels=channel_labels,
+                timing_metadata=_lsl_timing_metadata(config),
+            )
+            event_stream_name, event_stream_type, event_source_id, event_channel_labels = (
+                _lsl_event_config_for_mode(config, processing_mode)
+            )
+            lsl_event_sender = LSLBreathingSender(
+                name=event_stream_name,
+                type=event_stream_type,
+                channel_count=1,
+                nominal_srate=0,
+                source_id=event_source_id,
+                channel_labels=event_channel_labels,
+                timing_metadata=_lsl_timing_metadata(config),
+                event_code_map={
+                    1.0: "inhale_peak",
+                    -1.0: "exhale_trough",
+                },
             )
 
         print(
@@ -261,24 +343,53 @@ def run_acquisition(config: AppConfig) -> None:
         )
         print("Breathe normally and include full inhale/exhale range.")
         print("Press 'c' to stop acquisition.")
-        if lsl_sender is not None:
-            lsl_reference_time = lsl_sender.now()
 
         while not keyboard.is_pressed("c"):
-            data = belt.get_all()
-            if data.size == 0:
+            acquired_rows = belt.get_all()
+            if len(acquired_rows) == 0:
                 time.sleep(0.001)
                 continue
 
-            for row in data:
-                sample, pipeline_state = process_device_row(row, pipeline_state, pipeline_cfg)
+            dropped_rows_total = int(getattr(belt, "dropped_rows_total", 0))
+            if dropped_rows_total > reported_dropped_rows_total:
+                dropped_delta = dropped_rows_total - reported_dropped_rows_total
+                print(
+                    "WARNING [queue_overflow]: "
+                    f"dropped {dropped_delta} queued samples before processing."
+                )
+                reported_dropped_rows_total = dropped_rows_total
+                lsl_run_stats["queue_dropped_rows_total"] = dropped_rows_total
+
+            control_span_samples: list[float] = []
+            control_span_timestamps: list[float] = []
+            last_control_source_sample_index: int | None = None
+
+            for acquired_row in acquired_rows:
+                if (
+                    previous_source_sample_index is not None
+                    and acquired_row.source_sample_index != previous_source_sample_index + 1
+                ):
+                    lsl_run_stats["observed_gap_count"] += 1
+                previous_source_sample_index = acquired_row.source_sample_index
+
+                sample, pipeline_state = process_device_row(
+                    acquired_row.device_row,
+                    pipeline_state,
+                    pipeline_cfg,
+                )
+                lsl_timestamp_s = _effective_lsl_timestamp(
+                    acquired_row.capture_time_lsl_s,
+                    config.lsl.constant_delay_s,
+                )
                 session_writer.write_device_row(
                     stage=sample.stage,
                     sample_index=sample.sample_index,
                     relative_time_s=sample.relative_time_s,
-                    device_row=row,
+                    device_row=acquired_row.device_row,
+                    source_sample_index=acquired_row.source_sample_index,
+                    capture_time_lsl_s=acquired_row.capture_time_lsl_s,
+                    lsl_timestamp_s=lsl_timestamp_s,
                 )
-                session_writer.write_signal_sample(sample)
 
                 for message in sample.messages:
                     print(message)
@@ -286,38 +397,50 @@ def run_acquisition(config: AppConfig) -> None:
                     print(f"WARNING [{event.event_type}]: {event.message}")
                     session_writer.write_qc_event(event)
 
-                raw_sample_indices.append(acquisition_sample_index)
+                raw_sample_indices.append(acquired_row.source_sample_index)
                 raw_signal.append(sample.selected_sensor_raw)
 
+                event_timestamp_lsl_s: float | None = None
                 if sample.stage == "runtime":
                     runtime_value = (
                         sample.movement_value if processing_mode == "movement" else sample.normalized_value
                     )
                     if runtime_value is not None:
-                        normalized_sample_indices.append(acquisition_sample_index)
+                        normalized_sample_indices.append(acquired_row.source_sample_index)
                         normalized_signal.append(runtime_value)
                         if sample.extrema_event_code > 0.0:
-                            peak_sample_indices.append(acquisition_sample_index)
+                            peak_sample_indices.append(acquired_row.source_sample_index)
                             peak_raw_values.append(sample.selected_sensor_raw)
                         elif sample.extrema_event_code < 0.0:
-                            trough_sample_indices.append(acquisition_sample_index)
+                            trough_sample_indices.append(acquired_row.source_sample_index)
                             trough_raw_values.append(sample.selected_sensor_raw)
-                        if lsl_sender is not None:
-                            sample_timestamp = (
-                                None
-                                if lsl_reference_time is None
-                                else (
-                                    lsl_reference_time
-                                    + (
-                                        acquisition_sample_index
-                                        / float(config.device.sampling_rate_hz)
-                                    )
+                        if lsl_control_sender is not None:
+                            if (
+                                last_control_source_sample_index is not None
+                                and acquired_row.source_sample_index
+                                != last_control_source_sample_index + 1
+                            ):
+                                _flush_control_span(
+                                    lsl_control_sender,
+                                    samples=control_span_samples,
+                                    timestamps=control_span_timestamps,
+                                    lsl_run_stats=lsl_run_stats,
                                 )
+                            control_span_samples.append(float(runtime_value))
+                            control_span_timestamps.append(lsl_timestamp_s)
+                            last_control_source_sample_index = acquired_row.source_sample_index
+
+                        if (
+                            lsl_event_sender is not None
+                            and sample.extrema_event_code != 0.0
+                            and previous_runtime_lsl_timestamp is not None
+                        ):
+                            event_timestamp_lsl_s = previous_runtime_lsl_timestamp
+                            lsl_event_sender.send(
+                                float(sample.extrema_event_code),
+                                timestamp=event_timestamp_lsl_s,
                             )
-                            lsl_sender.send(
-                                [runtime_value, sample.extrema_event_code],
-                                timestamp=sample_timestamp,
-                            )
+                            lsl_run_stats["event_samples_sent"] += 1
                         if processing_mode == "movement":
                             print(f"Movement proxy: {runtime_value:.4f}")
                         elif processing_mode == "adaptive":
@@ -326,7 +449,22 @@ def run_acquisition(config: AppConfig) -> None:
                             print(f"Normalized: {runtime_value:.4f}")
                         if sample.extrema_event_label is not None:
                             print(f"Breath event: {sample.extrema_event_label}")
-                acquisition_sample_index += 1
+                        previous_runtime_lsl_timestamp = lsl_timestamp_s
+
+                session_writer.write_signal_sample(
+                    sample,
+                    source_sample_index=acquired_row.source_sample_index,
+                    capture_time_lsl_s=acquired_row.capture_time_lsl_s,
+                    lsl_timestamp_s=lsl_timestamp_s,
+                    event_timestamp_lsl_s=event_timestamp_lsl_s,
+                )
+
+            _flush_control_span(
+                lsl_control_sender,
+                samples=control_span_samples,
+                timestamps=control_span_timestamps,
+                lsl_run_stats=lsl_run_stats,
+            )
             session_writer.flush_raw()
 
             if config.display.enable_plot and raw_signal and update_live_plots is not None:
@@ -344,7 +482,7 @@ def run_acquisition(config: AppConfig) -> None:
                     and normalized_sample_indices
                     and (
                         normalized_sample_indices[-1] % config.device.sampling_rate_hz
-                    ) < len(data)
+                    ) < len(acquired_rows)
                 ):
                     print(
                         f"Plot window range check: min={window_min:.4f}, "
@@ -396,6 +534,7 @@ def run_acquisition(config: AppConfig) -> None:
                 qc_summary=raw_qc_summary(pipeline_state.qc_state),
                 processing_mode=processing_mode,
                 selected_mode_number=selected_mode_number,
+                lsl_run_stats=lsl_run_stats,
             )
             session_writer.finalize(metadata)
         print("Connection closed.")
