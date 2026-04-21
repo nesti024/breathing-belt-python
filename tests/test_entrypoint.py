@@ -7,6 +7,7 @@ from pathlib import Path
 import subprocess
 import sys
 from types import SimpleNamespace
+from uuid import uuid4
 
 import numpy as np
 
@@ -82,6 +83,28 @@ def test_prompt_processing_mode_defaults_to_control_on_empty_or_eof() -> None:
 
     assert (empty_mode, empty_processing) == (1, "control")
     assert (eof_mode, eof_processing) == (1, "control")
+
+
+def test_main_reports_configuration_error_when_live_config_lacks_mac(
+    monkeypatch,
+    capsys,
+) -> None:
+    run_called = False
+
+    def fake_run_acquisition(config: AppConfig) -> None:
+        del config
+        nonlocal run_called
+        run_called = True
+
+    monkeypatch.setattr(main_module, "run_acquisition", fake_run_acquisition)
+
+    missing_config_path = Path(".codex-tmp") / f"missing-config-{uuid4().hex}.toml"
+    exit_code = main_module.main(["--config", str(missing_config_path)])
+    captured = capsys.readouterr()
+
+    assert exit_code == 2
+    assert "device.mac_address must be set for live acquisition." in captured.err
+    assert run_called is False
 
 
 def test_run_acquisition_flushes_raw_export_once_per_chunk(monkeypatch) -> None:

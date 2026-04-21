@@ -22,7 +22,7 @@ if __package__ in {None, ""}:
     from src.pipeline import PipelineConfig, ProcessingMode, create_pipeline_state, process_device_row
     from src.quality import raw_qc_summary
     from src.session_writer import SessionWriter, build_session_metadata
-    from src.settings import AppConfig, load_config
+    from src.settings import AppConfig, load_config, validate_live_acquisition_config
 
     def _import_breath_belt():
         from src.connect import BreathBelt
@@ -43,7 +43,7 @@ else:
     from .pipeline import PipelineConfig, ProcessingMode, create_pipeline_state, process_device_row
     from .quality import raw_qc_summary
     from .session_writer import SessionWriter, build_session_metadata
-    from .settings import AppConfig, load_config
+    from .settings import AppConfig, load_config, validate_live_acquisition_config
 
     def _import_breath_belt():
         from .connect import BreathBelt
@@ -74,6 +74,7 @@ def main(argv: list[str] | None = None) -> int:
 
     try:
         config = load_config(args.config)
+        validate_live_acquisition_config(config)
     except Exception as error:
         print(f"Configuration error: {error}", file=sys.stderr)
         return 2
@@ -216,6 +217,7 @@ def run_acquisition(config: AppConfig) -> None:
 
     import keyboard
 
+    validate_live_acquisition_config(config)
     BreathBelt = _import_breath_belt()
     plot_window_samples = config.display.plot_window_length
     belt = None

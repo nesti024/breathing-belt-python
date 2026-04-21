@@ -194,34 +194,35 @@ def default_config() -> AppConfig:
 
 
 def load_config(path: str | Path) -> AppConfig:
-    """Load a TOML configuration file into typed application settings."""
+    """Load a TOML configuration file into typed application settings.
+
+    Missing config files fall back to the built-in defaults so tooling and dry
+    runs can resolve a complete configuration without device-specific setup.
+    """
 
     config_path = Path(path)
     if not config_path.exists():
-        raise FileNotFoundError(
-            f"Config file not found: {config_path}. Copy config.example.toml to config.toml "
-            "and update the device MAC address."
+        config = default_config()
+    else:
+        with config_path.open("rb") as handle:
+            raw_config = tomllib.load(handle)
+
+        config = AppConfig(
+            device=_load_device_config(_section(raw_config, "device")),
+            display=_load_display_config(_section(raw_config, "display")),
+            lsl=_load_lsl_config(_section(raw_config, "lsl")),
+            filter=_load_filter_config(_section(raw_config, "filter")),
+            movement=_load_movement_config(_section(raw_config, "movement")),
+            calibration=_load_calibration_settings(_section(raw_config, "calibration")),
+            adaptation=_load_adaptation_settings(_section(raw_config, "adaptation")),
+            hold=_load_hold_config(_section(raw_config, "hold")),
+            output_smoothing=_load_output_smoothing_config(
+                _section(raw_config, "output_smoothing")
+            ),
+            extrema=_load_extrema_config(_section(raw_config, "extrema")),
+            raw_qc=_load_raw_qc_config(_section(raw_config, "raw_qc")),
+            output=_load_output_config(_section(raw_config, "output")),
         )
-
-    with config_path.open("rb") as handle:
-        raw_config = tomllib.load(handle)
-
-    config = AppConfig(
-        device=_load_device_config(_section(raw_config, "device")),
-        display=_load_display_config(_section(raw_config, "display")),
-        lsl=_load_lsl_config(_section(raw_config, "lsl")),
-        filter=_load_filter_config(_section(raw_config, "filter")),
-        movement=_load_movement_config(_section(raw_config, "movement")),
-        calibration=_load_calibration_settings(_section(raw_config, "calibration")),
-        adaptation=_load_adaptation_settings(_section(raw_config, "adaptation")),
-        hold=_load_hold_config(_section(raw_config, "hold")),
-        output_smoothing=_load_output_smoothing_config(
-            _section(raw_config, "output_smoothing")
-        ),
-        extrema=_load_extrema_config(_section(raw_config, "extrema")),
-        raw_qc=_load_raw_qc_config(_section(raw_config, "raw_qc")),
-        output=_load_output_config(_section(raw_config, "output")),
-    )
     _validate_config(config)
     return config
 
@@ -551,8 +552,6 @@ def _load_output_config(section: dict[str, Any]) -> OutputConfig:
 
 
 def _validate_config(config: AppConfig) -> None:
-    if not config.device.mac_address:
-        raise ValueError("device.mac_address must be set in the config file.")
     if config.device.sampling_rate_hz <= 0:
         raise ValueError("device.sampling_rate_hz must be positive.")
     if config.device.chunk_size <= 0:
@@ -647,6 +646,13 @@ def _validate_config(config: AppConfig) -> None:
         raise ValueError("movement.low_activity_floor_per_sec must be positive.")
     if not (0.0 <= config.movement.low_activity_drift_scale <= 1.0):
         raise ValueError("movement.low_activity_drift_scale must be between 0 and 1.")
+
+
+def validate_live_acquisition_config(config: AppConfig) -> None:
+    """Validate settings required specifically for live device acquisition."""
+
+    if not config.device.mac_address.strip():
+        raise ValueError("device.mac_address must be set for live acquisition.")
 
 
 def _validate_filter_section(
