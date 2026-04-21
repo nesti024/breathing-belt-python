@@ -277,6 +277,169 @@ def test_run_acquisition_flushes_raw_export_once_per_chunk(monkeypatch) -> None:
     assert writer.flush_calls == 1
 
 
+def test_run_acquisition_resets_pipeline_state_when_source_samples_are_non_contiguous(
+    monkeypatch,
+) -> None:
+    defaults = default_config()
+    config = AppConfig(
+        device=defaults.device.__class__(
+            mac_address="00:00:00:00:00:00",
+            chunk_size=2,
+        ),
+        display=defaults.display.__class__(
+            enable_plot=False,
+            plot_window_length=defaults.display.plot_window_length,
+            debug_plot_window_bounds=defaults.display.debug_plot_window_bounds,
+        ),
+        lsl=defaults.lsl.__class__(
+            enable=False,
+            stream_name=defaults.lsl.stream_name,
+            stream_type=defaults.lsl.stream_type,
+            source_id=defaults.lsl.source_id,
+        ),
+        filter=defaults.filter,
+        movement=defaults.movement,
+        calibration=defaults.calibration,
+        adaptation=defaults.adaptation,
+        hold=defaults.hold,
+        output_smoothing=defaults.output_smoothing,
+        extrema=defaults.extrema,
+        raw_qc=defaults.raw_qc,
+        output=defaults.output.__class__(root_dir="ignored-in-test"),
+    )
+
+    class FakeBelt:
+        def __init__(self, **_: object) -> None:
+            self._reads = 0
+
+        def start(self) -> None:
+            return None
+
+        def get_all(self) -> list[AcquiredRow]:
+            self._reads += 1
+            if self._reads == 1:
+                return [
+                    AcquiredRow(
+                        device_row=np.array([0, 1, 2, 3, 4, 500, 0], dtype=float),
+                        source_sample_index=0,
+                        capture_time_lsl_s=10.0,
+                    ),
+                    AcquiredRow(
+                        device_row=np.array([1, 1, 2, 3, 4, 501, 0], dtype=float),
+                        source_sample_index=2,
+                        capture_time_lsl_s=10.02,
+                    ),
+                ]
+            return []
+
+        def stop(self) -> None:
+            return None
+
+    writer_instances: list[object] = []
+
+    class FakeSessionWriter:
+        def __init__(
+            self,
+            root_dir: str,
+            app_config: AppConfig,
+            *,
+            device_sample_width: int,
+        ) -> None:
+            self.root_dir = root_dir
+            self.app_config = app_config
+            self.device_sample_width = device_sample_width
+            self.resolved_config_path = Path("resolved_config.toml")
+            self.metadata: dict[str, object] | None = None
+            writer_instances.append(self)
+
+        def write_device_row(
+            self,
+            stage: str,
+            sample_index: int,
+            relative_time_s: float,
+            device_row: np.ndarray,
+            *,
+            source_sample_index: int,
+            capture_time_lsl_s: float,
+            lsl_timestamp_s: float,
+        ) -> None:
+            del (
+                stage,
+                sample_index,
+                relative_time_s,
+                device_row,
+                source_sample_index,
+                capture_time_lsl_s,
+                lsl_timestamp_s,
+            )
+
+        def write_signal_sample(
+            self,
+            sample: PipelineSample,
+            *,
+            source_sample_index: int,
+            capture_time_lsl_s: float,
+            lsl_timestamp_s: float,
+            event_timestamp_lsl_s: float | None = None,
+        ) -> None:
+            del sample, source_sample_index, capture_time_lsl_s, lsl_timestamp_s, event_timestamp_lsl_s
+
+        def write_qc_event(self, event: object) -> None:
+            del event
+
+        def flush_raw(self) -> None:
+            return None
+
+        def finalize(self, metadata: dict[str, object]) -> None:
+            self.metadata = metadata
+
+    reset_calls: list[object] = []
+
+    def fake_reset_pipeline_state_for_source_gap(state: object) -> None:
+        reset_calls.append(state)
+
+    def fake_process_device_row(row: np.ndarray, state: object, cfg: object) -> tuple[PipelineSample, object]:
+        del cfg
+        sample_index = int(row[0])
+        return (
+            PipelineSample(
+                stage="runtime",
+                sample_index=sample_index,
+                relative_time_s=sample_index / 100.0,
+                selected_sensor_raw=float(row[5]),
+                filtered_value=float(row[5]),
+                cleaned_value=float(row[5]),
+                normalized_value=0.5,
+                is_artifact=False,
+                hold_mode_active=False,
+                adaptive_center=None,
+                adaptive_amplitude=None,
+            ),
+            state,
+        )
+
+    fake_state = SimpleNamespace(calibration_result=None, adaptive_state=None, qc_state=None)
+    pressed = iter([False, True])
+    fake_keyboard = SimpleNamespace(is_pressed=lambda _: next(pressed))
+
+    monkeypatch.setitem(sys.modules, "keyboard", fake_keyboard)
+    monkeypatch.setattr(main_module, "prompt_processing_mode", lambda: (1, "control"))
+    monkeypatch.setattr(main_module, "_import_breath_belt", lambda: FakeBelt)
+    monkeypatch.setattr(main_module, "SessionWriter", FakeSessionWriter)
+    monkeypatch.setattr(main_module, "create_pipeline_state", lambda _: fake_state)
+    monkeypatch.setattr(main_module, "process_device_row", fake_process_device_row)
+    monkeypatch.setattr(main_module, "reset_pipeline_state_for_source_gap", fake_reset_pipeline_state_for_source_gap)
+    monkeypatch.setattr(main_module, "raw_qc_summary", lambda _: {})
+    monkeypatch.setattr(main_module, "build_session_metadata", lambda **kwargs: kwargs)
+
+    main_module.run_acquisition(config)
+
+    writer = writer_instances[0]
+    assert reset_calls == [fake_state]
+    assert writer.metadata is not None
+    assert writer.metadata["lsl_run_stats"]["observed_gap_count"] == 1
+
+
 def test_run_acquisition_limits_live_plot_history_to_configured_window(monkeypatch) -> None:
     defaults = default_config()
     config = AppConfig(

@@ -19,7 +19,13 @@ if __package__ in {None, ""}:
         sys.path.insert(0, str(repo_root))
 
     from src import __version__
-    from src.pipeline import PipelineConfig, ProcessingMode, create_pipeline_state, process_device_row
+    from src.pipeline import (
+        PipelineConfig,
+        ProcessingMode,
+        create_pipeline_state,
+        process_device_row,
+        reset_pipeline_state_for_source_gap,
+    )
     from src.quality import raw_qc_summary
     from src.session_writer import SessionWriter, build_session_metadata
     from src.settings import AppConfig, load_config, validate_live_acquisition_config
@@ -40,7 +46,13 @@ if __package__ in {None, ""}:
         return LSLBreathingSender
 else:
     from . import __version__
-    from .pipeline import PipelineConfig, ProcessingMode, create_pipeline_state, process_device_row
+    from .pipeline import (
+        PipelineConfig,
+        ProcessingMode,
+        create_pipeline_state,
+        process_device_row,
+        reset_pipeline_state_for_source_gap,
+    )
     from .quality import raw_qc_summary
     from .session_writer import SessionWriter, build_session_metadata
     from .settings import AppConfig, load_config, validate_live_acquisition_config
@@ -371,7 +383,18 @@ def run_acquisition(config: AppConfig) -> None:
                     previous_source_sample_index is not None
                     and acquired_row.source_sample_index != previous_source_sample_index + 1
                 ):
+                    missing_samples = max(
+                        acquired_row.source_sample_index - previous_source_sample_index - 1,
+                        0,
+                    )
                     lsl_run_stats["observed_gap_count"] += 1
+                    reset_pipeline_state_for_source_gap(pipeline_state)
+                    previous_runtime_lsl_timestamp = None
+                    print(
+                        "WARNING [source_gap]: "
+                        f"detected non-contiguous source samples ({missing_samples} "
+                        "missing sample(s)); reset short-term pipeline state."
+                    )
                 previous_source_sample_index = acquired_row.source_sample_index
 
                 sample, pipeline_state = process_device_row(

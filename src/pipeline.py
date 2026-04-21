@@ -216,6 +216,20 @@ def create_pipeline_state(cfg: PipelineConfig) -> PipelineState:
     )
 
 
+def reset_pipeline_state_for_source_gap(state: PipelineState) -> None:
+    """Reset short-lived continuity-sensitive state after a source-sample gap.
+
+    Calibration and adaptive reference state are preserved so processing can
+    resume without re-running the full startup procedure.
+    """
+
+    _reset_continuity_sensitive_state(
+        state,
+        reset_runtime_progress=False,
+        reset_stage_sample_index=False,
+    )
+
+
 def process_device_row(
     device_row: np.ndarray,
     state: PipelineState,
@@ -333,25 +347,11 @@ def process_device_row(
                         ),
                     ]
                 )
-            state.recent_abs_velocity.clear()
-            state.recent_output_abs_velocity.clear()
-            state.recent_movement_abs_velocity.clear()
-            state.recent_adaptive_abs_velocity.clear()
-            state.previous_filtered_value = None
-            state.previous_cleaned_value = None
-            state.previous_movement_activity_value = None
-            state.previous_adaptive_value = None
-            state.hold_mode_active = False
-            state.frozen_normalized_value = None
-            state.emitted_normalized_value = None
-            state.slowed_movement_value = None
-            state.runtime_processed_samples = 0
-            state.startup_mode_active = False
-            state.previous_delta_sign = 0
-            state.last_event_sample_index = None
-            state.last_peak_value = None
-            state.last_trough_value = None
-            state.stage_sample_index = 0
+            _reset_continuity_sensitive_state(
+                state,
+                reset_runtime_progress=True,
+                reset_stage_sample_index=True,
+            )
         else:
             state.stage_sample_index += 1
     else:
@@ -423,6 +423,40 @@ def process_device_row(
         qc_events=tuple(qc_events),
     )
     return sample, state
+
+
+def _reset_continuity_sensitive_state(
+    state: PipelineState,
+    *,
+    reset_runtime_progress: bool,
+    reset_stage_sample_index: bool,
+) -> None:
+    state.recent_abs_velocity.clear()
+    state.recent_output_abs_velocity.clear()
+    state.recent_movement_abs_velocity.clear()
+    state.recent_adaptive_abs_velocity.clear()
+    state.filter_initialized = False
+    state.sos_hp = None
+    state.zi_hp = None
+    state.sos_lp = None
+    state.zi_lp = None
+    state.previous_filtered_value = None
+    state.previous_cleaned_value = None
+    state.previous_movement_activity_value = None
+    state.previous_adaptive_value = None
+    state.hold_mode_active = False
+    state.frozen_normalized_value = None
+    state.emitted_normalized_value = None
+    state.slowed_movement_value = None
+    state.startup_mode_active = False
+    state.previous_delta_sign = 0
+    state.last_event_sample_index = None
+    state.last_peak_value = None
+    state.last_trough_value = None
+    if reset_runtime_progress:
+        state.runtime_processed_samples = 0
+    if reset_stage_sample_index:
+        state.stage_sample_index = 0
 
 
 def _filter_sample(raw_sensor_value: float, state: PipelineState, cfg: PipelineConfig) -> float:

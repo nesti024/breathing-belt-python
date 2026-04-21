@@ -5,7 +5,12 @@ from __future__ import annotations
 import numpy as np
 
 from src.calibration import normalize_sample
-from src.pipeline import PipelineConfig, create_pipeline_state, process_device_row
+from src.pipeline import (
+    PipelineConfig,
+    create_pipeline_state,
+    process_device_row,
+    reset_pipeline_state_for_source_gap,
+)
 from src.quality import raw_qc_summary
 from src.settings import (
     AdaptationSettings,
@@ -1122,6 +1127,81 @@ def test_pipeline_rejects_low_prominence_noise_as_extrema() -> None:
 
     runtime_samples = [sample for sample in samples if sample.stage == "runtime"]
     assert all(sample.extrema_event_code == 0.0 for sample in runtime_samples)
+
+
+def test_pipeline_gap_reset_preserves_long_lived_state_and_clears_short_term_state() -> None:
+    cfg = _make_pipeline_config(
+        calibration_duration_s=5.0,
+        processing_mode="adaptive",
+        adaptation=AdaptationSettings(
+            center_enabled=True,
+            amplitude_enabled=True,
+            center_tau_s=8.0,
+            amplitude_tau_s=1.0,
+            startup_duration_s=0.5,
+            startup_center_tau_s=0.2,
+            startup_amplitude_tau_s=0.2,
+        ),
+    )
+    values = np.concatenate(
+        [
+            _make_breathing_values(cfg.calibration_target_samples, amplitude=20.0),
+            _make_breathing_values(200, amplitude=25.0),
+        ]
+    )
+    _, state = _replay(values, cfg)
+
+    assert state.calibration_result is not None
+    assert state.adaptive_state is not None
+
+    calibration_result = state.calibration_result
+    adaptive_state = state.adaptive_state
+    runtime_processed_samples = state.runtime_processed_samples
+    stage_sample_index = state.stage_sample_index
+
+    assert runtime_processed_samples > 0
+    assert stage_sample_index > 0
+
+    reset_pipeline_state_for_source_gap(state)
+
+    assert state.calibration_result is calibration_result
+    assert state.adaptive_state is adaptive_state
+    assert state.runtime_processed_samples == runtime_processed_samples
+    assert state.stage_sample_index == stage_sample_index
+    assert len(state.recent_abs_velocity) == 0
+    assert len(state.recent_output_abs_velocity) == 0
+    assert len(state.recent_movement_abs_velocity) == 0
+    assert len(state.recent_adaptive_abs_velocity) == 0
+    assert state.filter_initialized is False
+    assert state.sos_hp is None
+    assert state.zi_hp is None
+    assert state.sos_lp is None
+    assert state.zi_lp is None
+    assert state.previous_filtered_value is None
+    assert state.previous_cleaned_value is None
+    assert state.previous_movement_activity_value is None
+    assert state.previous_adaptive_value is None
+    assert state.hold_mode_active is False
+    assert state.frozen_normalized_value is None
+    assert state.emitted_normalized_value is None
+    assert state.slowed_movement_value is None
+    assert state.startup_mode_active is False
+    assert state.previous_delta_sign == 0
+    assert state.last_event_sample_index is None
+    assert state.last_peak_value is None
+    assert state.last_trough_value is None
+
+    sample, state = process_device_row(
+        _make_row(530.0, processed_sensor_column=cfg.processed_sensor_column),
+        state,
+        cfg,
+    )
+
+    assert sample.stage == "runtime"
+    assert sample.extrema_event_code == 0.0
+    assert sample.extrema_event_label is None
+    assert state.runtime_processed_samples == runtime_processed_samples + 1
+    assert state.stage_sample_index == stage_sample_index + 1
 
 
 def test_pipeline_raw_qc_reports_saturation_flatline_and_baseline_shift() -> None:
