@@ -26,7 +26,7 @@ class RawQCState:
     """Mutable state for live raw-signal quality control."""
 
     last_raw_value: float | None = None
-    flatline_count: int = 0
+    flatline_run_samples: int = 0
     baseline_ema: float | None = None
     abs_dev_ema: float = 0.0
     samples_seen: int = 0
@@ -91,12 +91,14 @@ def update_raw_qc(
     state.saturation_active = saturated
 
     flatline_samples = max(1, int(round(cfg.flatline_duration_s * fs_hz)))
-    if state.last_raw_value is not None and abs(raw_float - state.last_raw_value) <= cfg.flatline_epsilon:
-        state.flatline_count += 1
+    if state.last_raw_value is None:
+        state.flatline_run_samples = 1
+    elif abs(raw_float - state.last_raw_value) <= cfg.flatline_epsilon:
+        state.flatline_run_samples += 1
     else:
-        state.flatline_count = 0
+        state.flatline_run_samples = 1
         state.flatline_active = False
-    if state.flatline_count >= flatline_samples and not state.flatline_active:
+    if state.flatline_run_samples >= flatline_samples and not state.flatline_active:
         events.append(
             _record_event(
                 state,

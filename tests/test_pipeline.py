@@ -11,7 +11,7 @@ from src.pipeline import (
     process_device_row,
     reset_pipeline_state_for_source_gap,
 )
-from src.quality import raw_qc_summary
+from src.quality import create_raw_qc_state, raw_qc_summary, update_raw_qc
 from src.settings import (
     AdaptationSettings,
     CalibrationSettings,
@@ -1236,3 +1236,36 @@ def test_pipeline_raw_qc_reports_saturation_flatline_and_baseline_shift() -> Non
     assert summary["event_counts"]["saturation"] >= 1
     assert summary["event_counts"]["flatline"] >= 1
     assert summary["event_counts"]["baseline_shift"] >= 1
+
+
+def test_raw_qc_flatline_triggers_on_the_exact_sample_duration_boundary() -> None:
+    cfg = RawQCConfig(
+        enabled=True,
+        raw_saturation_lo=-1e9,
+        raw_saturation_hi=1e9,
+        flatline_epsilon=0.1,
+        flatline_duration_s=0.2,
+        baseline_ema_tau_s=1.0,
+        baseline_abs_dev_tau_s=1.0,
+        baseline_shift_sigma=1e9,
+        baseline_shift_floor=1e9,
+        warmup_s=10.0,
+    )
+    state = create_raw_qc_state()
+    flatline_event_indices: list[int] = []
+
+    for sample_index in range(25):
+        events, state = update_raw_qc(
+            raw_value=512.0,
+            stage="runtime",
+            sample_index=sample_index,
+            relative_time_s=sample_index / FS_HZ,
+            state=state,
+            cfg=cfg,
+            fs_hz=float(FS_HZ),
+        )
+        flatline_event_indices.extend(
+            event.sample_index for event in events if event.event_type == "flatline"
+        )
+
+    assert flatline_event_indices == [19]
