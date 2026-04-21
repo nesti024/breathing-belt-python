@@ -228,7 +228,7 @@ def test_run_acquisition_flushes_raw_export_once_per_chunk(monkeypatch) -> None:
         def write_qc_event(self, event: object) -> None:
             self.qc_events.append(event)
 
-        def flush_raw(self) -> None:
+        def flush_incremental(self) -> None:
             self.flush_calls += 1
 
         def finalize(self, metadata: dict[str, object]) -> None:
@@ -387,7 +387,7 @@ def test_run_acquisition_resets_pipeline_state_when_source_samples_are_non_conti
         def write_qc_event(self, event: object) -> None:
             del event
 
-        def flush_raw(self) -> None:
+        def flush_incremental(self) -> None:
             return None
 
         def finalize(self, metadata: dict[str, object]) -> None:
@@ -545,7 +545,7 @@ def test_run_acquisition_limits_live_plot_history_to_configured_window(monkeypat
         def write_qc_event(self, event: object) -> None:
             del event
 
-        def flush_raw(self) -> None:
+        def flush_incremental(self) -> None:
             return None
 
         def finalize(self, metadata: dict[str, object]) -> None:

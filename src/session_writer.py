@@ -27,7 +27,7 @@ class SessionWriter:
         *,
         device_sample_width: int,
     ) -> None:
-        timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+        timestamp = datetime.now().strftime("%Y%m%d_%H%M%S_%f")
         self.session_dir = Path(root_dir) / timestamp
         self.session_dir.mkdir(parents=True, exist_ok=False)
         self._device_sample_width = int(device_sample_width)
@@ -95,7 +95,7 @@ class SessionWriter:
         self.resolved_config_path = self.session_dir / "resolved_config.toml"
         write_config_toml(self.resolved_config_path, config)
         self.metadata_path = self.session_dir / "session_metadata.json"
-        self.flush_raw()
+        self.flush_incremental()
 
     def write_device_row(
         self,
@@ -128,13 +128,17 @@ class SessionWriter:
         row_payload.update({f"device_col_{idx}": value for idx, value in enumerate(row_array)})
         self._device_writer.writerow(row_payload)
 
-    def flush_raw(self) -> None:
-        """Flush and fsync the raw device export so completed chunks are durable."""
+    def flush_incremental(self) -> None:
+        """Flush and fsync all incremental CSV exports for chunk-level durability."""
 
-        if self._device_file is None:
-            return
-        self._device_file.flush()
-        os.fsync(self._device_file.fileno())
+        self._flush_file(self._device_file)
+        self._flush_file(self._signal_file)
+        self._flush_file(self._qc_file)
+
+    def flush_raw(self) -> None:
+        """Compatibility alias for chunk-level incremental export flushing."""
+
+        self.flush_incremental()
 
     def write_signal_sample(
         self,
@@ -213,6 +217,13 @@ class SessionWriter:
         if self._qc_file is not None:
             self._qc_file.close()
             self._qc_file = None
+
+    @staticmethod
+    def _flush_file(handle) -> None:
+        if handle is None:
+            return
+        handle.flush()
+        os.fsync(handle.fileno())
 
 
 def build_session_metadata(

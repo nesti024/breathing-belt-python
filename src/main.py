@@ -490,7 +490,7 @@ def run_acquisition(config: AppConfig) -> None:
                 timestamps=control_span_timestamps,
                 lsl_run_stats=lsl_run_stats,
             )
-            session_writer.flush_raw()
+            session_writer.flush_incremental()
 
             if config.display.enable_plot and raw_signal and update_live_plots is not None:
                 if normalized_signal:

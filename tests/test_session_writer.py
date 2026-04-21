@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import csv
+from datetime import datetime
 import json
 from pathlib import Path
 import shutil
@@ -303,7 +304,7 @@ def test_session_writer_rejects_raw_row_width_mismatch() -> None:
         shutil.rmtree(root_dir, ignore_errors=True)
 
 
-def test_session_writer_flush_raw_fsyncs_device_file(monkeypatch) -> None:
+def test_session_writer_flush_incremental_fsyncs_all_csv_exports(monkeypatch) -> None:
     config = _make_config()
     root_dir = Path(".codex-tmp") / f"session-writer-flush-test-{uuid4().hex}"
     root_dir.mkdir(parents=True, exist_ok=False)
@@ -325,9 +326,42 @@ def test_session_writer_flush_raw_fsyncs_device_file(monkeypatch) -> None:
             capture_time_lsl_s=1.0,
             lsl_timestamp_s=1.0,
         )
-        writer.flush_raw()
+        writer.write_signal_sample(
+            PipelineSample(
+                stage="runtime",
+                sample_index=0,
+                relative_time_s=0.0,
+                selected_sensor_raw=500.0,
+                filtered_value=500.0,
+                cleaned_value=500.0,
+                normalized_value=0.5,
+                is_artifact=False,
+                hold_mode_active=False,
+                adaptive_center=None,
+                adaptive_amplitude=None,
+            ),
+            source_sample_index=0,
+            capture_time_lsl_s=1.0,
+            lsl_timestamp_s=1.0,
+        )
+        writer.write_qc_event(
+            RawQCEvent(
+                event_type="flatline",
+                stage="runtime",
+                sample_index=0,
+                relative_time_s=0.0,
+                raw_value=500.0,
+                threshold=0.1,
+                message="Test event.",
+            )
+        )
+        writer.flush_incremental()
 
-        assert fsync_calls == [writer._device_file.fileno()]
+        assert fsync_calls == [
+            writer._device_file.fileno(),
+            writer._signal_file.fileno(),
+            writer._qc_file.fileno(),
+        ]
         writer.close()
     finally:
         shutil.rmtree(root_dir, ignore_errors=True)
@@ -548,4 +582,50 @@ def test_session_writer_records_adaptive_mode_rows_and_metadata() -> None:
         assert stored_metadata["lsl"]["control_stream"]["channel_names"] == ["breath_level"]
         assert stored_metadata["lsl"]["event_stream"]["stream_name"] == "BreathingBeltAdaptiveEvents"
     finally:
+        shutil.rmtree(root_dir, ignore_errors=True)
+
+
+def test_session_writer_uses_microseconds_to_avoid_same_second_directory_collisions(
+    monkeypatch,
+) -> None:
+    config = _make_config()
+    root_dir = Path(".codex-tmp") / f"session-writer-timestamp-test-{uuid4().hex}"
+    root_dir.mkdir(parents=True, exist_ok=False)
+    now_values = iter(
+        [
+            datetime(2026, 4, 21, 14, 30, 15, 123456),
+            datetime(2026, 4, 21, 14, 30, 15, 654321),
+        ]
+    )
+
+    class FakeDateTime:
+        @classmethod
+        def now(cls) -> datetime:
+            del cls
+            return next(now_values)
+
+    monkeypatch.setattr("src.session_writer.datetime", FakeDateTime)
+
+    writer_one = None
+    writer_two = None
+    try:
+        writer_one = SessionWriter(
+            root_dir,
+            config,
+            device_sample_width=_device_sample_width(config),
+        )
+        writer_two = SessionWriter(
+            root_dir,
+            config,
+            device_sample_width=_device_sample_width(config),
+        )
+
+        assert writer_one.session_dir != writer_two.session_dir
+        assert writer_one.session_dir.name == "20260421_143015_123456"
+        assert writer_two.session_dir.name == "20260421_143015_654321"
+    finally:
+        if writer_one is not None:
+            writer_one.close()
+        if writer_two is not None:
+            writer_two.close()
         shutil.rmtree(root_dir, ignore_errors=True)
