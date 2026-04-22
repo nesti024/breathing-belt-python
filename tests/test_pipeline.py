@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import numpy as np
+import pytest
 
 from src.calibration import normalize_sample
 from src.pipeline import (
@@ -643,6 +644,17 @@ def test_pipeline_selected_sensor_column_is_processed() -> None:
     )
 
     assert np.isclose(sample.selected_sensor_raw, 750.0)
+
+
+def test_pipeline_rejects_processed_sensor_column_outside_acquired_row_width() -> None:
+    cfg = _make_pipeline_config(processed_sensor_column=6)
+    state = create_pipeline_state(cfg)
+
+    with pytest.raises(
+        ValueError,
+        match="device.processed_sensor_column=6 is out of bounds for acquired device_row width 6",
+    ):
+        process_device_row(np.zeros(6, dtype=float), state, cfg)
 
 
 def test_pipeline_invert_signal_flips_control_direction() -> None:

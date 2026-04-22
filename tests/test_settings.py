@@ -36,3 +36,21 @@ def test_validate_live_acquisition_config_accepts_configured_mac_address() -> No
     )
 
     validate_live_acquisition_config(config)
+
+
+def test_load_config_rejects_processed_sensor_column_outside_expected_row_width() -> None:
+    config_path = Path(".codex-tmp") / f"invalid-processed-sensor-column-{uuid4().hex}.toml"
+    config_path.parent.mkdir(parents=True, exist_ok=True)
+    config_path.write_text(
+        "[device]\nchannels = [0]\nprocessed_sensor_column = 6\n",
+        encoding="utf-8",
+    )
+
+    try:
+        with pytest.raises(
+            ValueError,
+            match="device.processed_sensor_column must be less than the expected BITalino row width",
+        ):
+            load_config(config_path)
+    finally:
+        config_path.unlink(missing_ok=True)

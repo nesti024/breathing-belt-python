@@ -16,7 +16,7 @@ from src.calibration import AdaptiveRangeState, CalibrationResult
 from src.pipeline import PipelineSample
 from src.quality import RawQCEvent
 from src.session_writer import SessionWriter, build_session_metadata
-from src.settings import AppConfig, default_config
+from src.settings import AppConfig, default_config, expected_bitalino_row_width
 
 
 def _make_config() -> AppConfig:
@@ -38,7 +38,7 @@ def _make_config() -> AppConfig:
 
 
 def _device_sample_width(config: AppConfig) -> int:
-    return 5 + len(config.device.channels)
+    return expected_bitalino_row_width(config.device.channels)
 
 
 def _timing_kwargs(

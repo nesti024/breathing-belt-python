@@ -8,6 +8,15 @@ import tomllib
 from typing import Any
 
 
+BITALINO_ANALOG_START_COLUMN = 5
+
+
+def expected_bitalino_row_width(channels: tuple[int, ...]) -> int:
+    """Return the full BITalino row width for the configured analog channels."""
+
+    return BITALINO_ANALOG_START_COLUMN + len(channels)
+
+
 @dataclass(frozen=True)
 class DeviceConfig:
     """Hardware and acquisition settings."""
@@ -15,7 +24,7 @@ class DeviceConfig:
     mac_address: str = ""
     sampling_rate_hz: int = 100
     channels: tuple[int, ...] = (0, 1)
-    processed_sensor_column: int = 5
+    processed_sensor_column: int = BITALINO_ANALOG_START_COLUMN
     chunk_size: int = 10
     queue_max_samples: int = 1000
     timeout_s: float = 0.25
@@ -560,6 +569,12 @@ def _validate_config(config: AppConfig) -> None:
         raise ValueError("device.processed_sensor_column must be non-negative.")
     if not config.device.channels:
         raise ValueError("device.channels must contain at least one channel.")
+    expected_row_width = expected_bitalino_row_width(config.device.channels)
+    if config.device.processed_sensor_column >= expected_row_width:
+        raise ValueError(
+            "device.processed_sensor_column must be less than the expected "
+            f"BITalino row width ({expected_row_width}) for the configured channels."
+        )
     if config.display.plot_window_length <= 0:
         raise ValueError("display.plot_window_length must be positive.")
     if config.lsl.constant_delay_s < 0.0:

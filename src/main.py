@@ -28,7 +28,12 @@ if __package__ in {None, ""}:
     )
     from src.quality import raw_qc_summary
     from src.session_writer import SessionWriter, build_session_metadata
-    from src.settings import AppConfig, load_config, validate_live_acquisition_config
+    from src.settings import (
+        AppConfig,
+        expected_bitalino_row_width,
+        load_config,
+        validate_live_acquisition_config,
+    )
 
     def _import_breath_belt():
         from src.connect import BreathBelt
@@ -55,7 +60,12 @@ else:
     )
     from .quality import raw_qc_summary
     from .session_writer import SessionWriter, build_session_metadata
-    from .settings import AppConfig, load_config, validate_live_acquisition_config
+    from .settings import (
+        AppConfig,
+        expected_bitalino_row_width,
+        load_config,
+        validate_live_acquisition_config,
+    )
 
     def _import_breath_belt():
         from .connect import BreathBelt
@@ -284,7 +294,7 @@ def run_acquisition(config: AppConfig) -> None:
     )
     pipeline_state = create_pipeline_state(pipeline_cfg)
     session_started_at = datetime.now().astimezone().isoformat()
-    device_sample_width = 5 + len(config.device.channels)
+    device_sample_width = expected_bitalino_row_width(config.device.channels)
 
     try:
         print("Starting acquisition...")

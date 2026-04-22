@@ -238,10 +238,23 @@ def process_device_row(
 ) -> tuple[PipelineSample, PipelineState]:
     """Process one BITalino row into a breathing-control sample."""
 
+    row_values = np.asarray(device_row)
+    if row_values.ndim != 1:
+        raise ValueError(
+            f"device_row must be one-dimensional, got shape {tuple(row_values.shape)}."
+        )
+
     stage = state.stage
     sample_index = state.stage_sample_index
     relative_time_s = sample_index / float(cfg.sampling_rate_hz)
-    raw_sensor_value = float(device_row[cfg.processed_sensor_column])
+    row_width = int(row_values.shape[0])
+    if cfg.processed_sensor_column >= row_width:
+        raise ValueError(
+            "device.processed_sensor_column="
+            f"{cfg.processed_sensor_column} is out of bounds for acquired "
+            f"device_row width {row_width}."
+        )
+    raw_sensor_value = float(row_values[cfg.processed_sensor_column])
     messages: list[str] = []
 
     filtered_value = _filter_sample(raw_sensor_value, state, cfg)
