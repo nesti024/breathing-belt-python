@@ -19,6 +19,11 @@ if __package__ in {None, ""}:
         sys.path.insert(0, str(repo_root))
 
     from src import __version__
+    from src.lsl_metadata import (
+        build_control_lsl_metadata,
+        build_event_lsl_metadata,
+        build_lsl_timing_metadata,
+    )
     from src.pipeline import (
         PipelineConfig,
         ProcessingMode,
@@ -51,6 +56,11 @@ if __package__ in {None, ""}:
         return LSLBreathingSender
 else:
     from . import __version__
+    from .lsl_metadata import (
+        build_control_lsl_metadata,
+        build_event_lsl_metadata,
+        build_lsl_timing_metadata,
+    )
     from .pipeline import (
         PipelineConfig,
         ProcessingMode,
@@ -177,55 +187,6 @@ def _plot_panel_config(processing_mode: ProcessingMode) -> tuple[str, str]:
     if processing_mode == "adaptive":
         return "Adaptive Breath Level (0-1)", "Adaptive Breath Level"
     return "Breath Level (0-1)", "Breath Level"
-
-
-def _lsl_config_for_mode(
-    config: AppConfig,
-    processing_mode: ProcessingMode,
-) -> tuple[str, str, str, tuple[str, ...]]:
-    if processing_mode == "movement":
-        return (
-            f"{config.lsl.stream_name}Movement",
-            "BreathingMovement",
-            f"{config.lsl.source_id}_movement",
-            ("movement_value",),
-        )
-    if processing_mode == "adaptive":
-        return (
-            f"{config.lsl.stream_name}Adaptive",
-            "BreathingAdaptive",
-            f"{config.lsl.source_id}_adaptive",
-            ("breath_level",),
-        )
-    return (
-        config.lsl.stream_name,
-        config.lsl.stream_type,
-        config.lsl.source_id,
-        ("breath_level",),
-    )
-
-
-def _lsl_event_config_for_mode(
-    config: AppConfig,
-    processing_mode: ProcessingMode,
-) -> tuple[str, str, str, tuple[str]]:
-    stream_name, _, source_id, _ = _lsl_config_for_mode(config, processing_mode)
-    return (
-        f"{stream_name}Events",
-        "BreathingEvents",
-        f"{source_id}_events",
-        ("event_code",),
-    )
-
-
-def _lsl_timing_metadata(config: AppConfig) -> dict[str, str | float]:
-    return {
-        "timestamp_domain": "local_clock",
-        "timestamp_origin": "host_estimated_segment_anchor",
-        "chunk_backfill_policy": "nominal_fs_continuation_across_contiguous_reads",
-        "constant_delay_s": config.lsl.constant_delay_s,
-        "discontinuity_policy": "preserve_timestamp_gaps_after_loss",
-    }
 
 
 def _effective_lsl_timestamp(capture_time_lsl_s: float, constant_delay_s: float) -> float:
@@ -355,33 +316,28 @@ def run_acquisition(config: AppConfig) -> None:
 
         if config.lsl.enable:
             LSLBreathingSender = _import_lsl_sender()
-            stream_name, stream_type, source_id, channel_labels = _lsl_config_for_mode(
-                config,
-                processing_mode,
-            )
+            control_lsl_metadata = build_control_lsl_metadata(config, processing_mode)
             lsl_control_sender = LSLBreathingSender(
-                name=stream_name,
-                type=stream_type,
+                name=str(control_lsl_metadata["stream_name"]),
+                type=str(control_lsl_metadata["stream_type"]),
                 channel_count=1,
                 nominal_srate=config.device.sampling_rate_hz,
-                source_id=source_id,
-                channel_labels=channel_labels,
-                timing_metadata=_lsl_timing_metadata(config),
+                source_id=str(control_lsl_metadata["source_id"]),
+                channel_labels=tuple(control_lsl_metadata["channel_names"]),
+                timing_metadata=build_lsl_timing_metadata(config),
             )
-            event_stream_name, event_stream_type, event_source_id, event_channel_labels = (
-                _lsl_event_config_for_mode(config, processing_mode)
-            )
+            event_lsl_metadata = build_event_lsl_metadata(config, processing_mode)
             lsl_event_sender = LSLBreathingSender(
-                name=event_stream_name,
-                type=event_stream_type,
+                name=str(event_lsl_metadata["stream_name"]),
+                type=str(event_lsl_metadata["stream_type"]),
                 channel_count=1,
                 nominal_srate=0,
-                source_id=event_source_id,
-                channel_labels=event_channel_labels,
-                timing_metadata=_lsl_timing_metadata(config),
+                source_id=str(event_lsl_metadata["source_id"]),
+                channel_labels=tuple(event_lsl_metadata["channel_names"]),
+                timing_metadata=build_lsl_timing_metadata(config),
                 event_code_map={
-                    1.0: "inhale_peak",
-                    -1.0: "exhale_trough",
+                    float(code): str(label)
+                    for code, label in dict(event_lsl_metadata["event_code_map"]).items()
                 },
             )
 
