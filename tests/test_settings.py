@@ -54,3 +54,26 @@ def test_load_config_rejects_processed_sensor_column_outside_expected_row_width(
             load_config(config_path)
     finally:
         config_path.unlink(missing_ok=True)
+
+
+def test_load_config_reads_runtime_print_settings() -> None:
+    config_path = Path(".codex-tmp") / f"runtime-print-settings-{uuid4().hex}.toml"
+    config_path.parent.mkdir(parents=True, exist_ok=True)
+    config_path.write_text(
+        "[device]\n"
+        'mac_address = "00:11:22:33:44:55"\n'
+        "channels = [0]\n"
+        "processed_sensor_column = 5\n"
+        "\n[display]\n"
+        "print_runtime_values = true\n"
+        "runtime_print_percent = 50\n",
+        encoding="utf-8",
+    )
+
+    try:
+        config = load_config(config_path)
+    finally:
+        config_path.unlink(missing_ok=True)
+
+    assert config.display.print_runtime_values is True
+    assert config.display.runtime_print_percent == 50

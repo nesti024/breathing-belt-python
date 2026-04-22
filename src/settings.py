@@ -41,6 +41,8 @@ class DisplayConfig:
     enable_plot: bool = True
     plot_window_length: int = 3000
     debug_plot_window_bounds: bool = True
+    print_runtime_values: bool = False
+    runtime_print_percent: int = 100
 
 
 @dataclass(frozen=True)
@@ -333,6 +335,12 @@ def _load_display_config(section: dict[str, Any]) -> DisplayConfig:
                 defaults.debug_plot_window_bounds,
             )
         ),
+        print_runtime_values=bool(
+            section.get("print_runtime_values", defaults.print_runtime_values)
+        ),
+        runtime_print_percent=int(
+            section.get("runtime_print_percent", defaults.runtime_print_percent)
+        ),
     )
 
 
@@ -577,6 +585,8 @@ def _validate_config(config: AppConfig) -> None:
         )
     if config.display.plot_window_length <= 0:
         raise ValueError("display.plot_window_length must be positive.")
+    if not 0 <= config.display.runtime_print_percent <= 100:
+        raise ValueError("display.runtime_print_percent must be between 0 and 100.")
     if config.lsl.constant_delay_s < 0.0:
         raise ValueError("lsl.constant_delay_s must be non-negative.")
     _validate_filter_section(

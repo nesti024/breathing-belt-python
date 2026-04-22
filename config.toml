@@ -16,6 +16,12 @@ invert_signal = false
 enable_plot = false
 plot_window_length = 3000
 debug_plot_window_bounds = true
+# Print sampled runtime values to stdout for debugging. Disabled by default to
+# avoid terminal I/O jitter in the acquisition loop.
+print_runtime_values = false
+# Percentage of runtime samples printed when debug printing is enabled.
+# 100 = print every sample, 50 = print half of the samples on average.
+runtime_print_percent = 100
 
 [lsl]
 enable = true

@@ -148,6 +148,29 @@ def _processing_mode_description(processing_mode: ProcessingMode) -> str:
     return "Legacy control (0..1, hold/smoothing)"
 
 
+def _runtime_value_label(processing_mode: ProcessingMode) -> str:
+    if processing_mode == "movement":
+        return "Movement proxy"
+    if processing_mode == "adaptive":
+        return "Adaptive normalized"
+    return "Normalized"
+
+
+def _advance_runtime_print_budget(
+    print_budget: int,
+    sample_percent: int,
+) -> tuple[bool, int]:
+    """Return whether to print this sample and the updated print budget."""
+
+    if sample_percent <= 0:
+        return False, 0
+
+    next_budget = print_budget + sample_percent
+    if next_budget < 100:
+        return False, next_budget
+    return True, next_budget - 100
+
+
 def _plot_panel_config(processing_mode: ProcessingMode) -> tuple[str, str]:
     if processing_mode == "movement":
         return "Movement Proxy (Centered)", "Movement Proxy"
@@ -261,6 +284,7 @@ def run_acquisition(config: AppConfig) -> None:
     trough_raw_values: deque[float] = deque(maxlen=plot_window_samples)
     previous_source_sample_index: int | None = None
     previous_runtime_lsl_timestamp: float | None = None
+    runtime_print_budget = 0
     reported_dropped_rows_total = 0
     lsl_run_stats: dict[str, int | str] = {
         "control_send_strategy": "hybrid_explicit_timestamps",
@@ -476,12 +500,19 @@ def run_acquisition(config: AppConfig) -> None:
                                 timestamp=event_timestamp_lsl_s,
                             )
                             lsl_run_stats["event_samples_sent"] += 1
-                        if processing_mode == "movement":
-                            print(f"Movement proxy: {runtime_value:.4f}")
-                        elif processing_mode == "adaptive":
-                            print(f"Adaptive normalized: {runtime_value:.4f}")
-                        else:
-                            print(f"Normalized: {runtime_value:.4f}")
+                        should_print_runtime_value = False
+                        if config.display.print_runtime_values:
+                            should_print_runtime_value, runtime_print_budget = (
+                                _advance_runtime_print_budget(
+                                    runtime_print_budget,
+                                    config.display.runtime_print_percent,
+                                )
+                            )
+                        if should_print_runtime_value:
+                            print(
+                                f"{_runtime_value_label(processing_mode)}: "
+                                f"{runtime_value:.4f}"
+                            )
                         if sample.extrema_event_label is not None:
                             print(f"Breath event: {sample.extrema_event_label}")
                         previous_runtime_lsl_timestamp = lsl_timestamp_s
