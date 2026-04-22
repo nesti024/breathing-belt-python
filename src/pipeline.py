@@ -153,7 +153,6 @@ class PipelineSample:
     filtered_value: float
     cleaned_value: float
     normalized_value: float | None
-    is_artifact: bool
     hold_mode_active: bool
     adaptive_center: float | None
     adaptive_amplitude: float | None
@@ -258,7 +257,7 @@ def process_device_row(
     messages: list[str] = []
 
     filtered_value = _filter_sample(raw_sensor_value, state, cfg)
-    cleaned_value, is_artifact = _suppress_reversal(filtered_value)
+    cleaned_value = filtered_value
     qc_events, state.qc_state = update_raw_qc(
         raw_value=raw_sensor_value,
         stage=stage,
@@ -388,7 +387,6 @@ def process_device_row(
             # Export one coherent pre-update adaptive snapshot with each sample.
             normalized_value, movement_value = _normalize_runtime_adaptive_sample(
                 cleaned_value,
-                is_artifact,
                 state,
                 cfg,
             )
@@ -399,7 +397,7 @@ def process_device_row(
                 cfg,
             )
         else:
-            normalized_value = _normalize_runtime_sample(cleaned_value, is_artifact, state, cfg)
+            normalized_value = _normalize_runtime_sample(cleaned_value, state, cfg)
             extrema_event_code, extrema_event_label = _detect_runtime_extremum(
                 cleaned_value,
                 sample_index,
@@ -429,7 +427,6 @@ def process_device_row(
         filtered_value=filtered_value,
         cleaned_value=cleaned_value,
         normalized_value=normalized_value,
-        is_artifact=is_artifact,
         hold_mode_active=(
             state.hold_mode_active if stage == "runtime" and cfg.processing_mode == "control" else False
         ),
@@ -553,19 +550,11 @@ def _with_raw_calibration_saturation(
     )
 
 
-def _suppress_reversal(
-    filtered_value: float,
-) -> tuple[float, bool]:
-    return float(filtered_value), False
-
-
 def _normalize_runtime_sample(
     cleaned_value: float,
-    is_artifact: bool,
     state: PipelineState,
     cfg: PipelineConfig,
 ) -> float:
-    del is_artifact
     if state.adaptive_state is None or state.calibration_result is None:
         raise RuntimeError("Calibration state must be initialized before runtime normalization.")
 
@@ -646,11 +635,9 @@ def _compute_runtime_movement_value(
 
 def _normalize_runtime_adaptive_sample(
     cleaned_value: float,
-    is_artifact: bool,
     state: PipelineState,
     cfg: PipelineConfig,
 ) -> tuple[float, float]:
-    del is_artifact
     if state.adaptive_state is None:
         raise RuntimeError("Adaptive state must be initialized before adaptive normalization.")
 

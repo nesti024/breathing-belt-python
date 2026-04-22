@@ -75,7 +75,6 @@ class SessionWriter:
                 "cleaned_value",
                 "normalized_value",
                 "movement_value",
-                "is_artifact",
                 "hold_mode_active",
                 "extrema_event_code",
                 "extrema_event_label",
@@ -179,7 +178,6 @@ class SessionWriter:
                 "movement_value": (
                     "" if sample.movement_value is None else f"{sample.movement_value:.6f}"
                 ),
-                "is_artifact": int(sample.is_artifact),
                 "hold_mode_active": int(sample.hold_mode_active),
                 "extrema_event_code": f"{sample.extrema_event_code:.1f}",
                 "extrema_event_label": "" if sample.extrema_event_label is None else sample.extrema_event_label,

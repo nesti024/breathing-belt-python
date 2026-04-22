@@ -81,7 +81,6 @@ def test_session_writer_creates_expected_files_and_rows() -> None:
             filtered_value=0.1,
             cleaned_value=0.1,
             normalized_value=None,
-            is_artifact=False,
             hold_mode_active=False,
             adaptive_center=None,
             adaptive_amplitude=None,
@@ -96,7 +95,6 @@ def test_session_writer_creates_expected_files_and_rows() -> None:
             filtered_value=1.2,
             cleaned_value=1.1,
             normalized_value=0.6,
-            is_artifact=False,
             hold_mode_active=False,
             adaptive_center=0.0,
             adaptive_amplitude=1.0,
@@ -216,6 +214,7 @@ def test_session_writer_creates_expected_files_and_rows() -> None:
         assert signal_rows[1]["source_sample_index"] == "1"
         assert signal_rows[1]["normalized_value"] == "0.600000"
         assert signal_rows[1]["movement_value"] == ""
+        assert "is_artifact" not in signal_rows[1]
         assert signal_rows[1]["extrema_event_code"] == "1.0"
         assert signal_rows[1]["extrema_event_label"] == "inhale_peak"
         assert signal_rows[1]["event_timestamp_lsl_s"] == "9.950000"
@@ -335,7 +334,6 @@ def test_session_writer_flush_incremental_fsyncs_all_csv_exports(monkeypatch) ->
                 filtered_value=500.0,
                 cleaned_value=500.0,
                 normalized_value=0.5,
-                is_artifact=False,
                 hold_mode_active=False,
                 adaptive_center=None,
                 adaptive_amplitude=None,
@@ -386,7 +384,6 @@ def test_session_writer_records_movement_mode_rows_and_metadata() -> None:
             filtered_value=1.8,
             cleaned_value=1.7,
             normalized_value=None,
-            is_artifact=False,
             hold_mode_active=False,
             adaptive_center=0.2,
             adaptive_amplitude=2.0,
@@ -495,7 +492,6 @@ def test_session_writer_records_adaptive_mode_rows_and_metadata() -> None:
             filtered_value=1.8,
             cleaned_value=1.7,
             normalized_value=0.62,
-            is_artifact=False,
             hold_mode_active=False,
             adaptive_center=0.2,
             adaptive_amplitude=2.0,
