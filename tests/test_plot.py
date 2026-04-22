@@ -108,6 +108,53 @@ def test_update_live_plots_adds_peak_and_trough_markers_to_raw_axis() -> None:
         plt.close(fig)
 
 
+def test_update_live_plots_preserves_unrelated_raw_axis_collections() -> None:
+    fig, raw_ax, raw_line, normalized_ax, normalized_line, _ = setup_live_plots()
+
+    try:
+        extra_artist = raw_ax.scatter(
+            np.array([0.0], dtype=float),
+            np.array([5.0], dtype=float),
+            color="tab:green",
+            s=25,
+            label="_nolegend_",
+        )
+
+        update_live_plots(
+            raw_channel_data=np.array([10.0, 20.0, 30.0], dtype=float),
+            raw_time=np.array([0.0, 1.0, 2.0], dtype=float),
+            normalized_channel_data=np.array([0.2, 0.4, 0.6], dtype=float),
+            normalized_time=np.array([0.0, 1.0, 2.0], dtype=float),
+            raw_ax=raw_ax,
+            raw_line=raw_line,
+            normalized_ax=normalized_ax,
+            normalized_line=normalized_line,
+            peak_times=np.array([1.0], dtype=float),
+            peak_values=np.array([20.0], dtype=float),
+            trough_times=np.array([2.0], dtype=float),
+            trough_values=np.array([30.0], dtype=float),
+        )
+        update_live_plots(
+            raw_channel_data=np.array([10.0, 20.0, 30.0], dtype=float),
+            raw_time=np.array([0.0, 1.0, 2.0], dtype=float),
+            normalized_channel_data=np.array([0.2, 0.4, 0.6], dtype=float),
+            normalized_time=np.array([0.0, 1.0, 2.0], dtype=float),
+            raw_ax=raw_ax,
+            raw_line=raw_line,
+            normalized_ax=normalized_ax,
+            normalized_line=normalized_line,
+            peak_times=np.array([0.0], dtype=float),
+            peak_values=np.array([10.0], dtype=float),
+            trough_times=np.array([1.0], dtype=float),
+            trough_values=np.array([20.0], dtype=float),
+        )
+
+        assert extra_artist in raw_ax.collections
+        assert len(raw_ax.collections) == 3
+    finally:
+        plt.close(fig)
+
+
 def test_update_live_plots_clips_normalized_trace_and_keeps_fixed_range() -> None:
     fig, raw_ax, raw_line, normalized_ax, normalized_line, _ = setup_live_plots()
 

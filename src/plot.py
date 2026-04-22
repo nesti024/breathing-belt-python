@@ -304,36 +304,56 @@ def _update_raw_event_markers(
     trough_times: Sequence[float] | np.ndarray | None,
     trough_values: Sequence[float] | np.ndarray | None,
 ) -> None:
-    while ax.collections:
-        ax.collections[0].remove()
+    _replace_raw_event_marker(
+        ax,
+        artist_attr_name="_peak_marker_artist",
+        times=peak_times,
+        values=peak_values,
+        marker="^",
+        color="tab:red",
+    )
+    _replace_raw_event_marker(
+        ax,
+        artist_attr_name="_trough_marker_artist",
+        times=trough_times,
+        values=trough_values,
+        marker="v",
+        color="tab:blue",
+    )
 
-    if peak_times is not None and peak_values is not None:
-        peak_x = np.asarray(peak_times, dtype=float)
-        peak_y = np.asarray(peak_values, dtype=float)
-        if peak_x.size > 0 and peak_y.size > 0:
-            ax.scatter(
-                peak_x,
-                peak_y,
-                marker="^",
-                color="tab:red",
-                s=36,
-                zorder=3,
-                label="_nolegend_",
-            )
 
-    if trough_times is not None and trough_values is not None:
-        trough_x = np.asarray(trough_times, dtype=float)
-        trough_y = np.asarray(trough_values, dtype=float)
-        if trough_x.size > 0 and trough_y.size > 0:
-            ax.scatter(
-                trough_x,
-                trough_y,
-                marker="v",
-                color="tab:blue",
-                s=36,
-                zorder=3,
-                label="_nolegend_",
-            )
+def _replace_raw_event_marker(
+    ax: Axes,
+    *,
+    artist_attr_name: str,
+    times: Sequence[float] | np.ndarray | None,
+    values: Sequence[float] | np.ndarray | None,
+    marker: str,
+    color: str,
+) -> None:
+    existing_artist = getattr(ax, artist_attr_name, None)
+    if existing_artist is not None:
+        existing_artist.remove()
+        setattr(ax, artist_attr_name, None)
+
+    if times is None or values is None:
+        return
+
+    marker_x = np.asarray(times, dtype=float)
+    marker_y = np.asarray(values, dtype=float)
+    if marker_x.size == 0 or marker_y.size == 0:
+        return
+
+    artist = ax.scatter(
+        marker_x,
+        marker_y,
+        marker=marker,
+        color=color,
+        s=36,
+        zorder=3,
+        label="_nolegend_",
+    )
+    setattr(ax, artist_attr_name, artist)
 
 
 def _show_live_figure() -> None:
