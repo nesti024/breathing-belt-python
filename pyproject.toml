@@ -29,5 +29,4 @@ packages = ["src"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
-cache_dir = ".codex-tmp/pytest-cache"
-addopts = "--basetemp=.codex-tmp/pytest-temp"
+addopts = "--basetemp=.codex-tmp/pytest-temp -p no:cacheprovider"
